@@ -73,9 +73,13 @@ public final class SnapshotIngestor {
             keys[i] = primaryKeyString(pkCol, i);
         }
 
-        // 2. 快照内主键唯一性
+        // 2. 主键非空校验（design 7.1）+ 快照内唯一性
         Set<String> seen = new HashSet<>(n);
-        for (String k : keys) {
+        for (int i = 0; i < n; i++) {
+            String k = keys[i];
+            if (k == null || k.isBlank()) {
+                throw new IngestException("主键不能为空（第 " + (i + 1) + " 行）");
+            }
             if (!seen.add(k)) {
                 throw new IngestException("快照内主键重复: " + k);
             }
