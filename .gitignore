@@ -1,1 +1,7 @@
-.reasonix
+.m2-repository/
+target/
+.reasonix/
+.vscode/
+.mvn/
+data/
+**/test/

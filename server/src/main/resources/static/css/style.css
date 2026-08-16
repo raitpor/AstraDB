@@ -1,0 +1,60 @@
+/* AstraDB 管理台样式（参考 docs/admin.html 风格） */
+body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; margin: 0; background: #f5f6fa; color: #2c3e50; }
+header { background: #2c3e50; color: #fff; padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; }
+header h1 { margin: 0; font-size: 20px; }
+header .sub { font-size: 12px; opacity: .8; }
+header a { color: #fff; text-decoration: none; }
+header a:hover { text-decoration: underline; }
+main { max-width: 1100px; margin: 20px auto; padding: 0 16px; }
+
+.card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.1); padding: 16px; margin-bottom: 16px; }
+.card h2 { margin: 0 0 12px; font-size: 15px; border-left: 3px solid #3498db; padding-left: 8px; }
+
+.stats-row { display: flex; gap: 24px; flex-wrap: wrap; }
+.stat { text-align: center; }
+.stat .num { font-size: 26px; font-weight: bold; color: #3498db; }
+.stat .lbl { font-size: 12px; color: #7f8c8d; }
+
+label { font-size: 13px; color: #555; margin-right: 4px; }
+input, select, button { padding: 6px 10px; border: 1px solid #d5dbe2; border-radius: 4px; font-size: 13px; }
+button { background: #3498db; color: #fff; border: none; cursor: pointer; }
+button:hover { background: #2980b9; }
+button.ghost { background: #ecf0f1; color: #2c3e50; }
+button.ghost:hover { background: #dfe6ec; }
+button.danger { background: #e74c3c; }
+button.danger:hover { background: #c0392b; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { border: 1px solid #e3e8ee; padding: 5px 8px; text-align: right; }
+th { background: #f0f3f7; position: sticky; top: 0; z-index: 1; }
+td:first-child, th:first-child { text-align: left; }
+table a { color: #3498db; text-decoration: none; }
+table a:hover { text-decoration: underline; }
+
+.table-scroll { height: 35vh; overflow-y: auto; border: 1px solid #e3e8ee; border-radius: 4px; }
+
+.point-box { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.pager { margin-top: 10px; display: flex; align-items: center; gap: 10px; font-size: 13px; }
+
+.kv { display: flex; gap: 8px; flex-wrap: wrap; }
+.kv .item { background: #f0f7ff; border: 1px solid #d6e9ff; border-radius: 4px; padding: 6px 12px; font-size: 13px; }
+.kv .item b { color: #2c3e50; }
+
+.hint { font-size: 12px; color: #95a5a6; margin-top: 6px; }
+.error { color: #e74c3c; font-size: 13px; }
+.ok { color: #27ae60; font-size: 13px; }
+code { font-size: 12px; background: #f0f3f7; padding: 3px 8px; border-radius: 4px; word-break: break-all; }
+
+.snap { margin: 2px; }
+#colTable { margin: 8px 0; }
+#colTable input, #colTable select { width: 110px; }
+
+/* 段详情弹窗 */
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 100; align-items: center; justify-content: center; }
+.modal-overlay.show { display: flex; }
+.modal { background: #fff; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.2); width: 640px; max-width: 92vw; max-height: 80vh; display: flex; flex-direction: column; }
+.modal-head { padding: 12px 16px; border-bottom: 1px solid #e3e8ee; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.modal-head h3 { margin: 0; font-size: 15px; word-break: break-all; }
+.modal-close { background: none; border: none; font-size: 20px; line-height: 1; cursor: pointer; color: #7f8c8d; padding: 2px 6px; }
+.modal-close:hover { color: #2c3e50; }
+.modal-body { padding: 12px 16px; overflow-y: auto; font-size: 13px; }

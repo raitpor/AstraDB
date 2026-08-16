@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title>AstraDB 管理台</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header>
+    <h1>AstraDB 管理台</h1>
+    <div class="sub">大数据量时间分片快照高压缩数据库 · 表管理 / 快照导入 / 回溯查询</div>
+</header>
+<main>
+
+    <!-- 表列表 -->
+    <div class="card">
+        <h2>表列表</h2>
+        <div class="table-scroll">
+            <table id="tables">
+                <thead><tr><th>表名</th><th>点数</th><th>段数</th><th>总行数</th><th>大小</th><th>操作</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 建表 -->
+    <div class="card">
+        <h2>建表</h2>
+        <form id="createForm">
+            <div class="point-box">
+                <label>表名</label><input id="tname" required>
+                <label>主键列</label><input id="tpk" required>
+                <label>保留天数</label><input id="tret" type="number" value="1825" min="1" style="width:90px">
+                <label>压缩等级</label><input id="tlevel" type="number" value="3" min="1" max="22" style="width:70px">
+            </div>
+            <table id="colTable">
+                <thead><tr><th>列名</th><th>类型</th><th></th></tr></thead>
+                <tbody></tbody>
+            </table>
+            <div class="point-box">
+                <button type="button" class="ghost" onclick="addCol()">+ 添加列</button>
+                <button type="submit">创建</button>
+            </div>
+        </form>
+        <div id="createMsg" class="error"></div>
+    </div>
+
+</main>
+
+<script src="/js/app.js"></script>
+<script>
+    addCol();
+    function addCol() {
+        const tbody = document.querySelector('#colTable tbody');
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td><input class="cname" required></td>' +
+            '<td><select class="ctype"><option>INT</option><option>LONG</option><option>DOUBLE</option><option>STRING</option></select></td>' +
+            '<td><button type="button" class="ghost" onclick="this.closest(\'tr\').remove()">删除</button></td>';
+        tbody.appendChild(tr);
+    }
+    document.getElementById('createForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const cols = [...document.querySelectorAll('#colTable tbody tr')].map(tr => ({
+            name: tr.querySelector('.cname').value,
+            type: tr.querySelector('.ctype').value
+        }));
+        const msg = document.getElementById('createMsg');
+        try {
+            const r = await api('/api/createTable', {
+                name: document.getElementById('tname').value,
+                primaryKey: document.getElementById('tpk').value,
+                retentionDays: parseInt(document.getElementById('tret').value),
+                compressionLevel: parseInt(document.getElementById('tlevel').value),
+                columns: cols
+            });
+            msg.className = 'ok';
+            msg.textContent = '创建成功: ' + r.name;
+            loadTables();
+        } catch (err) {
+            msg.className = 'error';
+            msg.textContent = '创建失败: ' + err;
+        }
+    });
+    loadTables();
+</script>
+</body>
+</html>

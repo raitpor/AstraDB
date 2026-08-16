@@ -32,6 +32,9 @@
 8. **导入语义**：同步返回（预算内），返回快照时间戳 + 行数；同表写串行（每表一个写队列），查询与写入并发；
 9. **崩溃恢复**：`.seg` Footer 缺失/损坏 → 顺序扫描 chunk 按 CRC 截断到最后一个完整 chunk；点字典走临时文件 + 原子 rename；
 10. **保留期**：表级配置天数，定时任务整文件删除超期 `.seg`，同步更新 manifest。
+11. **时区分片**：按天分片时区可配置（`astradb.timezone`，缺省系统时区），保证数据文件日期与页面/数据时间戳一致；
+12. **导入入口解耦**：`SnapshotData`（列缓冲 record）为通用导入载体，CSV 与其他导入方式解析为同一 record 后复用同一落盘逻辑；
+13. **段管理**：数据文件可查看段内快照时间戳（`listSegmentSnapshots`）与删除（`deleteSegment`，confirm + 路径穿越校验，不可恢复）；同段时间戳单调递增（乱序/重复拒绝，跨天回填允许）。
 
 ## 3. 总体架构
 
@@ -55,7 +58,7 @@ com.astradb.core
 ├── segment     SegmentWriter / SegmentReader / Chunk / ChunkIndex / 文件头尾解析
 ├── points      PointDictionary（key → pointId，含落盘与内存态）
 ├── manifest    Manifest 读写与重建（扫描 segments/ 恢复）
-├── ingest      CsvParser（流式）、SnapshotIngestor（校验→编码→落盘编排）
+├── ingest      CsvParser（流式）、SnapshotData（通用列缓冲载体）、SnapshotIngestor（校验→编码→落盘编排）
 ├── query       SnapshotQuery（按时间点全量）、PointSeriesQuery（单点历史）
 └── retention   RetentionCleaner（超期段清理）
 ```
@@ -196,8 +199,8 @@ interface ColumnCodec {
 ### 7.2 导入流程（SnapshotIngestor）
 
 ```
-1. 校验表存在、schema 冻结版本匹配
-2. 流式解析 CSV → 列缓冲（原始数组，禁止装箱）
+1. 校验表存在、schema 冻结版本匹配、列数与列类型一致
+2. 数据源解析 → SnapshotData（列缓冲 record）；CSV 由 CsvParser 产出，其他方式（JSON 等）解析为同一 record
 3. 校验主键快照内唯一；与点字典求并集，新点分配 pointId（内存态）
 4. 按 pointId 排序，值列按相同顺序重排
 5. 逐列编码（6.3）→ 压缩（6.5）
@@ -205,6 +208,11 @@ interface ColumnCodec {
 7. 更新 manifest（内存 + 落盘）
 8. 返回：快照时间戳、行数
 ```
+
+约束：
+
+- **时间戳单调递增**：同一 `.seg` 内快照时间戳必须严格递增（`SnapshotData`/CSV 入口均强制校验），保证 ChunkIndex 二分正确；乱序或重复时间戳拒绝导入。跨天（不同段）回填历史时间仍允许；
+- 导入入口解耦：`SnapshotIngestor.ingest(InputStream)`（CSV）与 `ingest(SnapshotData)`（通用）共用同一落盘逻辑，新增导入方式仅需实现"源 → SnapshotData"解析。
 
 并发：同表写串行（每表一个写队列，`.seg` 追加写单写者）；跨表独立；查询与写并发（读不阻塞写）。
 
@@ -268,6 +276,8 @@ interface ColumnCodec {
 | POST | `/api/getSnapshot` | 全量快照（分页），请求体：table + ts + offset/limit |
 | POST | `/api/getPointSeries` | 单点历史序列，请求体：table + key + from/to/limit |
 | POST | `/api/getTableStats` | 存储/压缩率统计，请求体：table |
+| POST | `/api/listSegmentSnapshots` | 段内快照时间戳与行数（数据文件详情），请求体：table + path |
+| POST | `/api/deleteSegment` | 删除数据文件（不可恢复），请求体：table + path + confirm=true |
 
 说明：所有操作均使用 POST；参数（除 `importSnapshot` 的 CSV 文件外）统一放入 JSON 请求体。
 
@@ -282,20 +292,19 @@ interface ColumnCodec {
 astradb:
   data-dir: ./data
   compression-level: 3        # 默认 zstd 压缩等级（1~22），建表时可表级覆盖
+  timezone: Asia/Shanghai     # 按天分片时区（保证数据文件与页面时间戳一致）；缺省取系统时区
 server:
   port: 8080
 ```
 
-## 12. 管理页面（Thymeleaf + 原生 JS）
+## 12. 管理页面（Thymeleaf + 原生 JS，参考 docs/admin.html 风格）
 
 | 页面 | 功能 |
 |---|---|
-| 首页 / 表列表 | 表概览、跳转 |
-| 建表 | schema 编辑（列名/类型/主键/保留期/压缩等级） |
-| 表详情 | schema、段文件列表、存储/压缩率统计 |
-| 快照导入 | CSV 上传（含 timestamp 输入） |
-| 快照查询 | 按时间点分页查看全量快照 |
-| 单点查询 | 按时间点分页查看单点值 |
+| 首页 / 表列表 | 表概览（统计式卡片）、建表（动态列编辑）、删除表（confirm） |
+| 表详情 | 概览统计、快照导入（CSV + 日期时间/毫秒时间戳联动）、按时间戳浏览数据（分页）、在该时间戳搜索点、数据文件浏览（查看段内快照时间戳弹窗 / 删除段文件） |
+
+页面数据全部经 REST API 获取（原生 JS fetch），无前端构建。
 
 ## 13. 内存与性能约束对照
 
@@ -335,8 +344,9 @@ AstraDB/
 
 - 建表后 schema 冻结：导入列数/类型/主键列不匹配 → 400 拒绝，不产生任何文件写入；
 - 快照内主键重复 → 400 拒绝整批导入（不做部分成功）；
-- 时间戳回填历史：允许写任意历史日期（按天分片），但禁止修改已有快照（时间戳冲突 → 409，提示已存在）；
+- 时间戳回填历史：允许写任意历史日期（按天分片），但同一段内时间戳必须单调递增——乱序/重复 → 400 拒绝（防止 ChunkIndex 二分失效）；跨天回填不受影响；
 - 单点查询 key 不存在 → 200 空序列（非错误）；
 - 内存压力：点字典载入超预算时告警，不自动扩容策略（点集缓慢增长，预留余量）；
 - 命名约束：表名/列名/主键值采用 UTF-8，禁止路径分隔符（`/`、`\`）与控制字符；
-- 删表语义：直接删除 `data/<表>` 目录，不可恢复；`deleteTable` 需携带 `confirm=true` 二次确认。
+- 删表语义：直接删除 `data/<表>` 目录，不可恢复；`deleteTable` 需携带 `confirm=true` 二次确认；
+- 段文件删除：`deleteSegment` 需 `confirm=true`；段路径仅允许 `segments/` 目录内相对路径（防路径穿越），删除后同步 manifest。

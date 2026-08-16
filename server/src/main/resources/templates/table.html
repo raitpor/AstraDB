@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <title th:text="'表 ' + ${tableName} + ' - AstraDB'">表详情</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header>
+    <h1>AstraDB 管理台</h1>
+    <div class="sub"><a href="/">← 返回表列表</a> · 当前表：<span th:text="${tableName}">table</span></div>
+</header>
+<main>
+
+    <!-- 概览 -->
+    <div class="card">
+        <h2>概览</h2>
+        <div class="stats-row">
+            <div class="stat"><div class="num" id="statPoints">–</div><div class="lbl">点数</div></div>
+            <div class="stat"><div class="num" id="statSegments">–</div><div class="lbl">段数</div></div>
+            <div class="stat"><div class="num" id="statRows">–</div><div class="lbl">总行数</div></div>
+            <div class="stat"><div class="num" id="statBytes">–</div><div class="lbl">占用空间</div></div>
+            <div class="stat"><div class="num" id="statRetention" style="font-size:18px">–</div><div class="lbl">保留天数</div></div>
+            <div class="stat"><div class="num" id="statLevel" style="font-size:18px">–</div><div class="lbl">zstd 等级</div></div>
+        </div>
+        <div id="schemaInfo" class="hint"></div>
+    </div>
+
+    <!-- 快照导入 -->
+    <div class="card">
+        <h2>快照导入</h2>
+        <form id="importForm">
+            <div class="point-box">
+                <label>CSV 文件</label><input id="csvFile" type="file" required>
+                <label>日期时间</label><input id="csvDateTime" type="datetime-local" step="1" style="width:230px">
+                <label>时间戳(毫秒)</label><input id="csvTs" type="number" placeholder="缺省取当前时间" style="width:200px">
+                <button type="submit">导入</button>
+            </div>
+            <div class="hint">日期时间与毫秒时间戳双向联动；两者均留空则取当前时间。</div>
+        </form>
+        <div id="importMsg" class="error"></div>
+        <div class="hint">CSV 格式：UTF-8、列序与 schema 一致、主键快照内唯一；首行可含表头。</div>
+    </div>
+
+    <!-- 按时间戳浏览数据 -->
+    <div class="card">
+        <h2>按时间戳浏览数据</h2>
+        <div class="point-box">
+            <label>时间戳</label>
+            <input id="browseTime" type="datetime-local" step="1" style="width:230px">
+            <button onclick="browse(0)">浏览</button>
+            <label>每页</label>
+            <select id="pageSize" onchange="browse(0)">
+                <option>10</option><option>15</option><option selected>20</option><option>25</option>
+            </select>
+            <span id="browseInfo" class="hint"></span>
+        </div>
+        <div class="point-box" style="margin-top: 4px">
+            <span class="hint">当前请求：</span>
+            <code id="browseReq">–</code>
+            <button class="ghost" onclick="copyText('browseReq')">复制</button>
+        </div>
+        <div id="browseTableWrap" class="table-scroll"></div>
+        <div class="pager">
+            <button class="ghost" onclick="browse(-1)">上一页</button>
+            <span id="pageInfo">–</span>
+            <button class="ghost" onclick="browse(1)">下一页</button>
+        </div>
+        <div id="browseError" class="error"></div>
+    </div>
+
+    <!-- 在该时间戳搜索点 -->
+    <div class="card">
+        <h2>在该时间戳搜索点</h2>
+        <div class="point-box">
+            <label>时间戳</label>
+            <input id="pointTime" type="datetime-local" step="1" style="width:230px">
+            <label>点 ID</label>
+            <input id="pointId" size="10" placeholder="如 1">
+            <button onclick="searchPoint()">搜索</button>
+        </div>
+        <div class="point-box" style="margin-top: 4px">
+            <span class="hint">当前请求：</span>
+            <code id="pointReq">–</code>
+            <button class="ghost" onclick="copyText('pointReq')">复制</button>
+        </div>
+        <div id="pointResult"></div>
+    </div>
+
+    <!-- 数据文件浏览 -->
+    <div class="card">
+        <h2>数据文件浏览</h2>
+        <div class="table-scroll">
+            <table id="segTable">
+                <thead><tr><th>文件</th><th>起始</th><th>结束</th><th>chunk 数</th><th>行数</th><th>大小</th><th>操作</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+</main>
+
+<!-- 段详情弹窗 -->
+<div class="modal-overlay" id="segModal" onclick="if (event.target === this) closeSegModal()">
+    <div class="modal">
+        <div class="modal-head">
+            <h3 id="segModalTitle">数据文件详情</h3>
+            <button class="modal-close" onclick="closeSegModal()" title="关闭">×</button>
+        </div>
+        <div class="modal-body" id="segModalBody"></div>
+    </div>
+</div>
+
+<script src="/js/app.js"></script>
+<script>
+    const $ = id => document.getElementById(id);
+    const tableName = '[[${tableName}]]';
+
+    let page = 0, lastTotal = 0;
+    let schemaCols = [];
+
+    async function loadInfo() {
+        const info = await api('/api/getTableInfo', {table: tableName});
+        $('statPoints').textContent = info.pointCount;
+        $('statSegments').textContent = info.segmentCount;
+        $('statRows').textContent = info.totalRows;
+        $('statBytes').textContent = fmtBytes(info.totalSizeBytes);
+        $('statRetention').textContent = info.retentionDays + ' 天';
+        $('statLevel').textContent = info.compressionLevel;
+        schemaCols = info.schema.columns.map(c => c.name);
+        $('schemaInfo').textContent = 'schema: ' + info.schema.columns.map(c => c.name + ':' + c.type).join('，');
+    }
+
+    async function loadSegments() {
+        const segs = (await api('/api/getTableStats', {table: tableName})).segments;
+        const tbody = document.querySelector('#segTable tbody');
+        tbody.innerHTML = '';
+        if (!segs.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="hint">暂无数据文件</td></tr>';
+            return;
+        }
+        for (const s of segs) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td>${s.path}</td><td>${fmtTime(s.startTime)}</td><td>${fmtTime(s.endTime)}</td>
+                <td>${s.chunkCount}</td><td>${s.rows}</td><td>${fmtBytes(s.sizeBytes)}</td>
+                <td><button class="ghost" onclick="showSegmentSnapshots('${s.path}')">查看</button>
+                    <button class="danger" onclick="deleteSegmentFile('${s.path}')">删除</button></td>`;
+            tbody.appendChild(tr);
+        }
+    }
+
+    // ---- 数据文件：段详情弹窗 / 删除 ----
+
+    async function showSegmentSnapshots(path) {
+        try {
+            const list = await api('/api/listSegmentSnapshots', {table: tableName, path});
+            document.getElementById('segModalTitle').textContent = '数据文件：' + path;
+            const body = document.getElementById('segModalBody');
+            if (!list.length) {
+                body.innerHTML = '<div class="hint">段内无快照</div>';
+            } else {
+                let html = `<div class="hint">共 ${list.length} 个快照</div>
+                    <table><thead><tr><th>#</th><th>本地时间</th><th>时间戳（毫秒）</th><th>行数</th></tr></thead><tbody>`;
+                list.forEach((s, i) => {
+                    html += `<tr><td>${i + 1}</td><td>${fmtTime(s.timestamp)}</td><td>${s.timestamp}</td><td>${s.rows}</td></tr>`;
+                });
+                html += '</tbody></table>';
+                body.innerHTML = html;
+            }
+            document.getElementById('segModal').classList.add('show');
+        } catch (e) {
+            alert('读取失败: ' + e);
+        }
+    }
+
+    function closeSegModal() {
+        document.getElementById('segModal').classList.remove('show');
+    }
+
+    async function deleteSegmentFile(path) {
+        if (!confirm('确认删除数据文件 ' + path + '？此操作不可恢复！')) return;
+        try {
+            await api('/api/deleteSegment', {table: tableName, path, confirm: true});
+            loadSegments(); loadInfo();
+        } catch (e) {
+            alert('删除失败: ' + e);
+        }
+    }
+
+    // ---- 按时间戳浏览数据 ----
+
+    async function browse(delta) {
+        const raw = $('browseTime').value;
+        if (!raw) { $('browseError').textContent = '请先选择日期时间'; return; }
+        const ts = new Date(raw).getTime(); // datetime-local（本地时区）→ 毫秒
+        if (delta === -1 && page > 0) page--;
+        if (delta === 1) page++;
+        if (delta === 0) page = 0;
+        const size = parseInt($('pageSize').value);
+        const req = {table: tableName, ts: ts, offset: page * size, limit: size};
+        $('browseReq').textContent = 'POST /api/getSnapshot ' + JSON.stringify(req);
+        try {
+            const s = await api('/api/getSnapshot', req);
+            $('browseError').textContent = '';
+            lastTotal = s.totalRows;
+            const rows = s.rows || [];
+            if (rows.length === 0 && page > 0) { page--; return browse(0); }
+            if (rows.length === 0) {
+                $('browseTableWrap').innerHTML = '<div class="hint">该时间点没有数据</div>';
+                $('pageInfo').textContent = '–';
+                $('browseInfo').textContent = `请求时间 ${fmtTime(ts)}`;
+                return;
+            }
+            let html = '<table><tr><th>' + (schemaCols[0] || '主键') + '</th>';
+            for (let i = 1; i < schemaCols.length; i++) html += `<th>${schemaCols[i]}</th>`;
+            html += '</tr>';
+            for (const r of rows) {
+                html += `<tr><td>${r.key}</td>`;
+                for (const v of r.values) {
+                    html += `<td>${v === null || v === undefined ? '∅' : v}</td>`;
+                }
+                html += '</tr>';
+            }
+            html += '</table>';
+            $('browseTableWrap').innerHTML = html;
+            $('pageInfo').textContent = `第 ${page + 1} 页 · 共 ${lastTotal} 行 · 快照时间 ${fmtTime(s.timestamp)}`;
+            $('browseInfo').textContent = `请求时间 ${fmtTime(ts)}`;
+        } catch (e) {
+            $('browseError').textContent = '浏览失败: ' + e.message;
+        }
+    }
+
+    // ---- 在该时间戳搜索点 ----
+
+    async function searchPoint() {
+        const raw = $('pointTime').value;
+        const id = $('pointId').value.trim();
+        const box = $('pointResult');
+        if (!raw || id === '') { box.innerHTML = '<span class="error">请选择日期时间并填写点 ID</span>'; return; }
+        const ts = new Date(raw).getTime();
+        // 该时间戳的状态 = 时间轴上 ≤ ts 的最近一条快照值
+        const req = {table: tableName, key: id, from: 0, to: ts, limit: 10000};
+        $('pointReq').textContent = 'POST /api/getPointSeries ' + JSON.stringify(req);
+        try {
+            const list = await api('/api/getPointSeries', req);
+            if (!list.length) {
+                box.innerHTML = '<div class="hint">该时间点（或之前）没有该点的数据</div>';
+                return;
+            }
+            const last = list[list.length - 1]; // 升序列表最后一条 = 最近值
+            let html = `<div class="hint">点 ${id} · 实际快照时间 ${fmtTime(last.timestamp)}</div><div class="kv">`;
+            for (let i = 0; i < last.values.length; i++) {
+                html += `<div class="item"><b>${schemaCols[i + 1] || 'c' + (i + 1)}</b> = ${last.values[i]}</div>`;
+            }
+            html += '</div>';
+            box.innerHTML = html;
+        } catch (e) {
+            box.innerHTML = '<span class="error">搜索失败: ' + e.message + '</span>';
+        }
+    }
+
+    function copyText(elId) {
+        const text = $(elId).textContent;
+        if (!text || text === '–') return;
+        navigator.clipboard.writeText(text).then(() => {
+            const btn = event.target;
+            const old = btn.textContent;
+            btn.textContent = '已复制';
+            setTimeout(() => { btn.textContent = old; }, 1200);
+        }).catch(() => {});
+    }
+
+    // ---- 快照导入 ----
+
+    /** 毫秒 → datetime-local 输入值（本地时区） */
+    function msToLocalInput(ms) {
+        const d = new Date(ms);
+        const p = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T`
+            + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+
+    // 日期时间 ↔ 毫秒时间戳 双向联动
+    const csvDt = document.getElementById('csvDateTime');
+    const csvTs = document.getElementById('csvTs');
+    csvDt.addEventListener('change', () => {
+        if (csvDt.value) csvTs.value = new Date(csvDt.value).getTime();
+    });
+    csvTs.addEventListener('input', () => {
+        if (csvTs.value) csvDt.value = msToLocalInput(parseInt(csvTs.value, 10));
+    });
+
+    document.getElementById('importForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fd = new FormData();
+        fd.append('table', tableName);
+        const ts = document.getElementById('csvTs').value;
+        if (ts) fd.append('timestamp', ts);
+        fd.append('file', document.getElementById('csvFile').files[0]);
+        const msg = document.getElementById('importMsg');
+        try {
+            const r = await apiUpload('/api/importSnapshot', fd);
+            msg.className = 'ok';
+            msg.textContent =
+                `导入成功：${r.rowCount} 行，新点 ${r.newPoints}，时间戳 ${fmtTime(r.timestamp)}`;
+            loadInfo(); loadSegments();
+        } catch (err) {
+            msg.className = 'error';
+            msg.textContent = '导入失败: ' + err;
+        }
+    });
+
+    loadInfo();
+    loadSegments();
+</script>
+</body>
+</html>
