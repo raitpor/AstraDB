@@ -4,7 +4,7 @@
 
 专为"周期性全量快照 + 长期保留 + 回溯查询"负载设计：以时间分片组织快照、以时间序列编码（Gorilla）压缩值列、以主键列匹配检索点，用最小的空间保存任意历史时刻的全量状态。
 
-> 场景与设计见 [docs/scenario.md](docs/scenario.md)、[docs/design.md](docs/design.md)；测试计划/用例/缺陷/报告见 [docs/test/](docs/test/)。
+> 场景与设计见 [docs/scenario.md](docs/scenario.md)、[docs/design.md](docs/design.md)。
 
 ## 特性
 
