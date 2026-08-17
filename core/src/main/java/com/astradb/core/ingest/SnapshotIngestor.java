@@ -13,7 +13,6 @@ import com.astradb.core.segment.SegmentPaths;
 import com.astradb.core.segment.SegmentWriter;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -37,18 +36,9 @@ public final class SnapshotIngestor {
     private SnapshotIngestor() {
     }
 
-    /** 从 CSV 解析并导入。 */
-    public static IngestResult ingest(TableMeta table, PointDictionary dict, Manifest manifest,
-                                      Compressor compressor, InputStream csv, Long timestamp,
-                                      java.time.ZoneId zone)
-            throws IOException {
-        SnapshotData data = CsvParser.parse(csv, table.schema(), true);
-        return ingest(table, dict, manifest, compressor, data, timestamp, zone);
-    }
-
     /**
-     * 以 {@link SnapshotData}（列缓冲）导入：适用于 CSV 之外的任何导入方式
-     * （JSON、Java API 等），解析为 SnapshotData 后即可复用本入口。
+     * 以 {@link SnapshotData}（列缓冲）导入：CSV/JSON/Java API 等任何导入方式
+     * 解析为 SnapshotData 后调用本入口；core 在导入前校验表结构与列类型与数据一致。
      */
     public static IngestResult ingest(TableMeta table, PointDictionary dict, Manifest manifest,
                                       Compressor compressor, SnapshotData data, Long timestamp,
@@ -105,6 +95,14 @@ public final class SnapshotIngestor {
         Schema schema = table.schema();
         if (data.columns().size() != schema.columnCount()) {
             throw new IngestException("列数不符：期望 " + schema.columnCount() + "，实际 " + data.columns().size());
+        }
+        // 表结构与列类型校验：快照数据每列类型须与 schema 冻结的列类型一致（导入前拦截）
+        for (int i = 0; i < schema.columnCount(); i++) {
+            ColumnType expected = schema.columns().get(i).type();
+            ColumnType actual = data.columns().get(i).type();
+            if (expected != actual) {
+                throw new IngestException("第 " + (i + 1) + " 列类型不符：期望 " + expected + "，实际 " + actual);
+            }
         }
         List<Column> columns = data.columns();
         int n = data.rowCount();

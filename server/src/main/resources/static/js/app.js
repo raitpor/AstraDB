@@ -8,10 +8,10 @@ async function api(path, body) {
     });
     if (!resp.ok) {
         let msg = 'HTTP ' + resp.status;
-        try { msg = (await resp.json()).error || msg; } catch (e) { /* 忽略 */ }
+        try { const j = await resp.json(); msg = j.message || j.error || msg; } catch (e) { /* 忽略 */ }
         throw msg;
     }
-    // 空响应体（如 deleteTable 旧版）容错
+    // 空响应体容错
     const text = await resp.text();
     return text ? JSON.parse(text) : null;
 }
@@ -20,7 +20,7 @@ async function apiUpload(path, formData) {
     const resp = await fetch(path, {method: 'POST', body: formData});
     if (!resp.ok) {
         let msg = 'HTTP ' + resp.status;
-        try { msg = (await resp.json()).error || msg; } catch (e) { /* 忽略 */ }
+        try { const j = await resp.json(); msg = j.message || j.error || msg; } catch (e) { /* 忽略 */ }
         throw msg;
     }
     const text = await resp.text();

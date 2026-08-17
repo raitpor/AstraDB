@@ -1,25 +1,28 @@
 astradb:
-  data-dir: ./data
-  compression-level: 3
+  # 数据目录（环境变量覆盖）
+  data-dir: ${ASTRA_DB_DATA_DIR:./data}
+  compression-level: ${ASTRA_DB_COMPRESSION_LEVEL:3}
   # 按天分片时区（与页面/数据时间戳保持一致）；缺省取系统时区
   # 示例：Asia/Shanghai、UTC、+08:00
-  timezone: Asia/Shanghai
+  timezone: ${ASTRA_DB_TIMEZONE:Asia/Shanghai}
   # 查询列解压 LRU 缓存上限（MB；0 禁用；同一快照多次分页/查询复用解压结果）
   query:
-    cache-mb: 64
+    cache-mb: ${ASTRA_DB_QUERY_CACHE_MB:64}
+  # API 耗时超过该值记录 WARN 慢查询日志（ms）
+  slow-query-threshold-ms: ${ASTRA_DB_SLOW_QUERY_THRESHOLD_MS:500}
   # API 与页面鉴权（生产开启；默认关闭便于本地开发）
   security:
-    enabled: false
-    username: admin
-    password: admin123    # 生产务必通过环境变量 ASTRA_DB_SECURITY_PASSWORD 覆盖
+    enabled: ${ASTRA_DB_SECURITY_ENABLED:false}
+    username: ${ASTRA_DB_SECURITY_USERNAME:admin}
+    password: ${ASTRA_DB_SECURITY_PASSWORD:admin123}
 
 server:
-  port: 8080
+  port: ${ASTRA_DB_PORT:8080}
 
 spring:
   servlet:
     multipart:
-      max-file-size: 200MB
-      max-request-size: 200MB
+      max-file-size: ${ASTRA_DB_MAX_FILE_SIZE:200MB}
+      max-request-size: ${ASTRA_DB_MAX_FILE_SIZE:200MB}
   thymeleaf:
     cache: false

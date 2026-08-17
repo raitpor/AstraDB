@@ -15,6 +15,7 @@ import com.astradb.core.query.ChunkCache;
 import com.astradb.core.query.PointSeriesQuery;
 import com.astradb.core.query.SnapshotQuery;
 import com.astradb.core.retention.RetentionCleaner;
+import com.astradb.core.segment.SegmentChannelCache;
 import com.astradb.core.segment.SegmentPaths;
 import com.astradb.core.segment.SegmentReader;
 
@@ -84,6 +85,10 @@ public final class AstraDB implements AutoCloseable {
     private final ReentrantReadWriteLock globalLock = new ReentrantReadWriteLock();
     /** 查询列解压 LRU 缓存（跨查询复用，缓解反复解压；0 = 禁用）。 */
     private final ChunkCache cache;
+    /** 段文件句柄空闲池（复用 FileChannel，减少查询反复打开/关闭）。 */
+    private final SegmentChannelCache segmentChannels;
+
+    private static final int DEFAULT_MAX_CHANNELS = 64;
 
     private AstraDB(Path dataDir, int defaultCompressionLevel, java.time.ZoneId zone, TablesStore store,
                     long cacheBytes) {
@@ -92,6 +97,7 @@ public final class AstraDB implements AutoCloseable {
         this.zone = zone;
         this.store = store;
         this.cache = new ChunkCache(cacheBytes);
+        this.segmentChannels = new SegmentChannelCache(DEFAULT_MAX_CHANNELS);
     }
 
     /** 打开（或初始化）数据库目录，按天分片使用系统默认时区。 */
@@ -142,7 +148,7 @@ public final class AstraDB implements AutoCloseable {
         }
         PointDictionary dict = PointDictionary.load(dir.resolve("points.dict"));
         Manifest manifest = Manifest.load(dir.resolve("manifest.json"), meta.name());
-        validateManifest(meta, dict, manifest, new ZstdCompressor(meta.compressionLevel()));
+        validateManifest(meta, dict, manifest, new ZstdCompressor(meta.compressionLevel()), segmentChannels);
         states.put(meta.name(), new TableState(meta, dict, manifest,
                 new ZstdCompressor(meta.compressionLevel())));
     }
@@ -161,7 +167,7 @@ public final class AstraDB implements AutoCloseable {
 
     /** 启动校验：manifest 与磁盘段一致，不一致则校正。正常启动走轻量描述（不解码），仅漂移/缺失段精确重建窗口。 */
     private static void validateManifest(TableMeta meta, PointDictionary dict, Manifest manifest,
-                                         Compressor compressor)
+                                         Compressor compressor, SegmentChannelCache channels)
             throws IOException {
         Path segRoot = meta.dir().resolve("segments");
         Set<String> disk = new HashSet<>();
@@ -172,11 +178,11 @@ public final class AstraDB implements AutoCloseable {
                         .filter(p -> p.getFileName().toString().endsWith(".seg")).toList()) {
                     String rel = SegmentPaths.relative(p, meta.dir());
                     disk.add(rel);
-                    Manifest.SegmentInfo light = describeSegmentLight(meta, p, rel);
+                    Manifest.SegmentInfo light = describeSegmentLight(meta, p, rel, channels);
                     Manifest.SegmentInfo old = findSegment(manifest, rel);
                     if (old == null || !sameSegmentInfo(old, light)) {
                         // 缺失或信息漂移 → 精确重建（解码主键列计算 minKey/maxKey）
-                        diskInfos.add(describeSegmentPrecise(meta, p, rel, compressor));
+                        diskInfos.add(describeSegmentPrecise(meta, p, rel, compressor, channels));
                     }
                 }
             }
@@ -205,9 +211,10 @@ public final class AstraDB implements AutoCloseable {
     }
 
     /** 轻量描述：仅读段头与 ChunkIndex（不解码数据列），min/max 占位。 */
-    private static Manifest.SegmentInfo describeSegmentLight(TableMeta meta, Path p, String rel)
+    private static Manifest.SegmentInfo describeSegmentLight(TableMeta meta, Path p, String rel,
+                                                                 SegmentChannelCache channels)
             throws IOException {
-        try (SegmentReader reader = SegmentReader.open(p)) {
+        try (SegmentReader reader = SegmentReader.open(p, channels)) {
             long rows = 0;
             long endTime = reader.segmentStartTime();
             for (int i = 0; i < reader.chunkCount(); i++) {
@@ -229,9 +236,10 @@ public final class AstraDB implements AutoCloseable {
     }
 
     /** 由磁盘段读取段信息；minKey/maxKey 精确计算（解码主键列首尾，K-01）。 */
-    private static Manifest.SegmentInfo describeSegmentPrecise(TableMeta meta, Path p, String rel, Compressor compressor)
+    private static Manifest.SegmentInfo describeSegmentPrecise(TableMeta meta, Path p, String rel,
+                                                                      Compressor compressor, SegmentChannelCache channels)
             throws IOException {
-        try (SegmentReader reader = SegmentReader.open(p)) {
+        try (SegmentReader reader = SegmentReader.open(p, channels)) {
             long rows = 0;
             long endTime = reader.segmentStartTime();
             int minKey = Integer.MAX_VALUE;
@@ -348,17 +356,7 @@ public final class AstraDB implements AutoCloseable {
 
     // ---- 数据写入 ----
 
-    public SnapshotIngestor.IngestResult ingest(String name, InputStream csv, Long timestamp) throws IOException {
-        TableState st = stateOf(name);
-        st.lock.writeLock().lock();
-        try {
-            return SnapshotIngestor.ingest(st.meta, st.dict, st.manifest, st.compressor, csv, timestamp, zone);
-        } finally {
-            st.lock.writeLock().unlock();
-        }
-    }
-
-    /** 以 SnapshotData（列缓冲）导入：供 CSV 之外的导入方式复用同一落盘入口。 */
+    /** 以 SnapshotData（列缓冲）导入：唯一单快照入口（core 导入前校验表结构与列类型）。 */
     public SnapshotIngestor.IngestResult ingest(String name, com.astradb.core.ingest.SnapshotData data, Long timestamp)
             throws IOException {
         TableState st = stateOf(name);
@@ -389,7 +387,7 @@ public final class AstraDB implements AutoCloseable {
         TableState st = stateOf(name);
         st.lock.readLock().lock();
         try {
-            return SnapshotQuery.getSnapshot(st.meta, st.dict, st.manifest, st.compressor, cache, ts, offset, limit);
+            return SnapshotQuery.getSnapshot(st.meta, st.dict, st.manifest, st.compressor, cache, segmentChannels, ts, offset, limit);
         } finally {
             st.lock.readLock().unlock();
         }
@@ -400,7 +398,7 @@ public final class AstraDB implements AutoCloseable {
         TableState st = stateOf(name);
         st.lock.readLock().lock();
         try {
-            return SnapshotQuery.getFullSnapshot(st.meta, st.dict, st.manifest, st.compressor, cache, ts);
+            return SnapshotQuery.getFullSnapshot(st.meta, st.dict, st.manifest, st.compressor, cache, segmentChannels, ts);
         } finally {
             st.lock.readLock().unlock();
         }
@@ -412,7 +410,7 @@ public final class AstraDB implements AutoCloseable {
         TableState st = stateOf(name);
         st.lock.readLock().lock();
         try {
-            return PointSeriesQuery.getSeries(st.meta, st.dict, st.manifest, st.compressor, cache, key, from, to, limit);
+            return PointSeriesQuery.getSeries(st.meta, st.dict, st.manifest, st.compressor, cache, segmentChannels, key, from, to, limit);
         } finally {
             st.lock.readLock().unlock();
         }
@@ -428,7 +426,7 @@ public final class AstraDB implements AutoCloseable {
         TableState st = stateOf(name);
         st.lock.writeLock().lock();
         try {
-            return RetentionCleaner.clean(st.meta, st.manifest, now);
+            return RetentionCleaner.clean(st.meta, st.manifest, now, segmentChannels);
         } finally {
             st.lock.writeLock().unlock();
         }
@@ -453,7 +451,7 @@ public final class AstraDB implements AutoCloseable {
             List<Long> out = new ArrayList<>();
             for (Manifest.SegmentInfo seg : st.manifest.segments()) {
                 Path p = st.meta.dir().resolve(seg.path());
-                try (SegmentReader r = SegmentReader.open(p)) {
+                try (SegmentReader r = SegmentReader.open(p, segmentChannels)) {
                     for (int i = 0; i < r.chunkCount(); i++) {
                         out.add(r.timestampAt(i));
                     }
@@ -475,7 +473,7 @@ public final class AstraDB implements AutoCloseable {
                 throw new IllegalArgumentException("段文件不存在: " + relativePath);
             }
             List<SegmentSnapshotInfo> out = new ArrayList<>();
-            try (SegmentReader r = SegmentReader.open(seg)) {
+            try (SegmentReader r = SegmentReader.open(seg, segmentChannels)) {
                 for (int i = 0; i < r.chunkCount(); i++) {
                     out.add(new SegmentSnapshotInfo(r.timestampAt(i), r.entry(i).rowCount()));
                 }
@@ -502,6 +500,7 @@ public final class AstraDB implements AutoCloseable {
             if (info == null) {
                 throw new IllegalArgumentException("段不存在（manifest 未记录）: " + relativePath);
             }
+            segmentChannels.evict(seg);
             Files.deleteIfExists(seg);
             st.manifest.remove(relativePath);
             st.manifest.save();
@@ -565,7 +564,8 @@ public final class AstraDB implements AutoCloseable {
 
     @Override
     public void close() {
-        // 所有写入均即时落盘（fsync），无内存态需要冲刷
+        // 所有写入均即时落盘（fsync），无内存态需要冲刷；释放段句柄池
+        segmentChannels.close();
     }
 
     /** 供 JSON 序列化统计引用。 */

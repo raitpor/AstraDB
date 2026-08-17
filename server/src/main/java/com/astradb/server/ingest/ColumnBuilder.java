@@ -1,4 +1,4 @@
-package com.astradb.core.ingest;
+package com.astradb.server.ingest;
 
 import com.astradb.core.meta.Column;
 import com.astradb.core.meta.ColumnType;
@@ -20,11 +20,16 @@ final class ColumnBuilder {
     }
 
     void add(String raw) {
-        switch (type) {
-            case INT -> addInt(Integer.parseInt(raw.trim()));
-            case LONG -> addLong(Long.parseLong(raw.trim()));
-            case DOUBLE -> addDouble(Double.parseDouble(raw.trim()));
-            case STRING -> addString(raw);
+        try {
+            switch (type) {
+                case INT -> addInt(Integer.parseInt(raw.trim()));
+                case LONG -> addLong(Long.parseLong(raw.trim()));
+                case DOUBLE -> addDouble(Double.parseDouble(raw.trim()));
+                case STRING -> addString(raw);
+            }
+        } catch (NumberFormatException e) {
+            throw new com.astradb.core.ingest.SnapshotIngestor.IngestException(
+                    "无法解析为 " + type + ": '" + raw + "'");
         }
     }
 

@@ -1,5 +1,7 @@
-package com.astradb.core.ingest;
+package com.astradb.server.ingest;
 
+import com.astradb.core.ingest.SnapshotData;
+import com.astradb.core.ingest.SnapshotIngestor;
 import com.astradb.core.meta.Column;
 import com.astradb.core.meta.Schema;
 
@@ -14,7 +16,7 @@ import java.util.List;
 /**
  * 流式 CSV 解析（RFC 4180 风格）：UTF-8、逗号分隔、引号转义（""），
  * 列序与 schema 一致；首行若与列名完全一致则视为表头跳过。
- * 解析结果为 {@link SnapshotData}，可直接交给 {@link SnapshotIngestor} 导入。
+ * 解析结果为 {@link SnapshotData}，可直接交给 core 的 {@link SnapshotIngestor} 导入（core 导入前校验表结构与列类型）。
  */
 public final class CsvParser {
 
@@ -73,7 +75,7 @@ public final class CsvParser {
                         continue;
                     }
                     if (fields.size() != columnCount) {
-                        throw new IOException("CSV 第 " + (rowNum + 1) + " 行列数不符: 期望 " + columnCount
+                        throw new com.astradb.core.ingest.SnapshotIngestor.IngestException("CSV 第 " + (rowNum + 1) + " 行列数不符: 期望 " + columnCount
                                 + ", 实际 " + fields.size());
                     }
                     for (int i = 0; i < columnCount; i++) {
@@ -99,7 +101,7 @@ public final class CsvParser {
             fields.add(cur.toString());
             if (!(rowNum == 0 && mayHaveHeader && isHeader(fields, schema))) {
                 if (fields.size() != columnCount) {
-                    throw new IOException("CSV 最后一行列数不符: 期望 " + columnCount + ", 实际 " + fields.size());
+                    throw new com.astradb.core.ingest.SnapshotIngestor.IngestException("CSV 最后一行列数不符: 期望 " + columnCount + ", 实际 " + fields.size());
                 }
                 for (int i = 0; i < columnCount; i++) {
                     builders.get(i).add(fields.get(i));

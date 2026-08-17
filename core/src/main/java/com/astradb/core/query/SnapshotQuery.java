@@ -7,6 +7,7 @@ import com.astradb.core.meta.Column;
 import com.astradb.core.meta.TableMeta;
 import com.astradb.core.points.PointDictionary;
 import com.astradb.core.segment.ChunkCodec;
+import com.astradb.core.segment.SegmentChannelCache;
 import com.astradb.core.segment.SegmentReader;
 
 import java.io.IOException;
@@ -35,13 +36,14 @@ public final class SnapshotQuery {
 
     /** 分页查询：精确时间点匹配；仅解码 [offset, offset+limit) 行区间（可选 LRU 缓存复用）。 */
     public static SnapshotPage getSnapshot(TableMeta table, PointDictionary dict, Manifest manifest,
-                                           Compressor compressor, ChunkCache cache, long ts,
+                                           Compressor compressor, ChunkCache cache,
+                                           SegmentChannelCache channels, long ts,
                                            int offset, int limit)
             throws IOException {
         if (limit <= 0) {
             return SnapshotPage.empty(ts);
         }
-        Located loc = locateBytes(table, manifest, compressor, ts);
+        Located loc = locateBytes(table, manifest, compressor, channels, ts);
         if (loc == null) {
             return SnapshotPage.empty(ts);
         }
@@ -59,9 +61,10 @@ public final class SnapshotQuery {
     }
 
     public static FullSnapshot getFullSnapshot(TableMeta table, PointDictionary dict, Manifest manifest,
-                                               Compressor compressor, ChunkCache cache, long ts)
+                                               Compressor compressor, ChunkCache cache,
+                                               SegmentChannelCache channels, long ts)
             throws IOException {
-        Located loc = locateBytes(table, manifest, compressor, ts);
+        Located loc = locateBytes(table, manifest, compressor, channels, ts);
         if (loc == null) {
             return FullSnapshot.empty(ts);
         }
@@ -126,7 +129,8 @@ public final class SnapshotQuery {
     }
 
     /** 定位并读取精确时间点的 chunk 字节（timestamp == ts）；无匹配返回 null。 */
-    private static Located locateBytes(TableMeta table, Manifest manifest, Compressor compressor, long ts)
+    private static Located locateBytes(TableMeta table, Manifest manifest, Compressor compressor,
+                                            SegmentChannelCache channels, long ts)
             throws IOException {
         Manifest.SegmentInfo seg = manifest.lastAtOrBefore(ts);
         if (seg == null) {
@@ -136,7 +140,7 @@ public final class SnapshotQuery {
         if (!Files.exists(segPath)) {
             throw new IOException("段文件缺失: " + segPath);
         }
-        try (SegmentReader reader = SegmentReader.open(segPath)) {
+        try (SegmentReader reader = SegmentReader.open(segPath, channels)) {
             int idx = reader.findChunkAtOrBefore(ts);
             if (idx < 0 || reader.timestampAt(idx) != ts) {
                 return null;

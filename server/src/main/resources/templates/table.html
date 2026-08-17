@@ -35,10 +35,12 @@
                 <label>日期时间</label><input id="csvDateTime" type="datetime-local" step="1" style="width:230px">
                 <label>时间戳(毫秒)</label><input id="csvTs" type="number" placeholder="缺省取当前时间" style="width:200px">
                 <button type="submit">导入</button>
+                <label style="margin-left:12px"><input id="asyncImport" type="checkbox"> 异步导入</label>
             </div>
-            <div class="hint">日期时间与毫秒时间戳双向联动；两者均留空则取当前时间。</div>
+            <div class="hint">日期时间与毫秒时间戳双向联动；两者均留空则取当前时间。异步导入立即返回任务 ID，后台执行（适合大文件）。</div>
         </form>
         <div id="importMsg" class="error"></div>
+        <div id="importAsyncMsg" class="hint" style="display:none"></div>
         <div class="hint">CSV 格式：UTF-8、列序与 schema 一致、主键快照内唯一；首行可含表头。</div>
     </div>
 
@@ -298,6 +300,41 @@
         if (ts) fd.append('timestamp', ts);
         fd.append('file', document.getElementById('csvFile').files[0]);
         const msg = document.getElementById('importMsg');
+        msg.className = 'error';
+        msg.textContent = '';
+        const asyncMsg = document.getElementById('importAsyncMsg');
+        asyncMsg.style.display = 'none';
+        if (document.getElementById('asyncImport').checked) {
+            // 异步导入：提交后轮询任务状态
+            try {
+                const r = await apiUpload('/api/importAsync', fd);
+                const taskId = r.taskId;
+                asyncMsg.style.display = 'block';
+                const btn = e.submitter;
+                btn.disabled = true;
+                const poll = async () => {
+                    const st = await api('/api/importStatus', { taskId });
+                    if (st.status === 'RUNNING') {
+                        asyncMsg.textContent = `任务 ${taskId}：导入中…`;
+                        setTimeout(poll, 800);
+                    } else if (st.status === 'SUCCESS') {
+                        asyncMsg.className = 'ok';
+                        asyncMsg.textContent =
+                            `任务 ${taskId} 完成：${st.rowCount} 行，新点 ${st.newPoints}`;
+                        btn.disabled = false;
+                        loadInfo(); loadSegments();
+                    } else {
+                        asyncMsg.className = 'error';
+                        asyncMsg.textContent = `任务 ${taskId} 失败：${st.error}`;
+                        btn.disabled = false;
+                    }
+                };
+                poll();
+            } catch (err) {
+                msg.textContent = '提交失败: ' + err;
+            }
+            return;
+        }
         try {
             const r = await apiUpload('/api/importSnapshot', fd);
             msg.className = 'ok';

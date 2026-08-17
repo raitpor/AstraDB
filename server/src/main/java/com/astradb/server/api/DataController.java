@@ -4,6 +4,7 @@ import com.astradb.core.ingest.SnapshotIngestor;
 import com.astradb.core.query.PointSeriesQuery;
 import com.astradb.core.query.SnapshotQuery;
 import com.astradb.server.service.AstraDbService;
+import com.astradb.server.service.ImportTaskService;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -11,8 +12,15 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonGenerator;
+import org.springframework.http.MediaType;
+
+import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Map;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -24,9 +32,11 @@ import java.util.List;
 public class DataController {
 
     private final AstraDbService service;
+    private final ImportTaskService importTaskService;
 
-    public DataController(AstraDbService service) {
+    public DataController(AstraDbService service, ImportTaskService importTaskService) {
         this.service = service;
+        this.importTaskService = importTaskService;
     }
 
     public record SnapshotListRequest(String table) {
@@ -52,8 +62,10 @@ public class DataController {
             @RequestParam("table") String table,
             @RequestParam(value = "timestamp", required = false) Long timestamp,
             @RequestParam("file") MultipartFile file) throws IOException {
+        com.astradb.core.meta.Schema schema = service.db().tableInfo(table).schema();
         try (InputStream in = file.getInputStream()) {
-            return service.db().ingest(table, in, timestamp);
+            com.astradb.core.ingest.SnapshotData data = com.astradb.server.ingest.CsvParser.parse(in, schema, true);
+            return service.db().ingest(table, data, timestamp);
         }
     }
 
@@ -62,15 +74,64 @@ public class DataController {
         return service.db().listSnapshots(req.table());
     }
 
+    /** 异步导入：提交后立即返回 taskId，后台执行（大文件不阻塞请求）。 */
+    @PostMapping("/importAsync")
+    public Map<String, String> importAsync(
+            @RequestParam("table") String table,
+            @RequestParam(value = "timestamp", required = false) Long timestamp,
+            @RequestParam("file") MultipartFile file) throws IOException {
+        com.astradb.core.meta.Schema schema = service.db().tableInfo(table).schema();
+        com.astradb.core.ingest.SnapshotData data;
+        try (InputStream in = file.getInputStream()) {
+            data = com.astradb.server.ingest.CsvParser.parse(in, schema, true);
+        }
+        String taskId = importTaskService.submit(table, timestamp, data);
+        return Map.of("taskId", taskId);
+    }
+
+    public record TaskStatusRequest(String taskId) {
+    }
+
+    /** 查询异步导入任务状态。 */
+    @PostMapping("/importStatus")
+    public ImportTaskService.TaskState importStatus(@RequestBody TaskStatusRequest req) {
+        ImportTaskService.TaskState st = importTaskService.status(req.taskId());
+        if (st == null) {
+            throw new IllegalArgumentException("任务不存在: " + req.taskId());
+        }
+        return st;
+    }
+
     @PostMapping("/getSnapshot")
     public SnapshotQuery.SnapshotPage getSnapshot(@RequestBody SnapshotRequest req) throws IOException {
         return service.db().snapshot(req.table(), req.ts(), req.offset(), req.limit());
     }
 
-    /** 全量快照（不分页）。 */
+    /** 全量快照（不分页，流式 JSON 输出避免整页内存缓冲）。 */
     @PostMapping("/getFullSnapshot")
-    public SnapshotQuery.FullSnapshot getFullSnapshot(@RequestBody FullSnapshotRequest req) throws IOException {
-        return service.db().fullSnapshot(req.table(), req.ts());
+    public void getFullSnapshot(@RequestBody FullSnapshotRequest req, HttpServletResponse resp) throws IOException {
+        SnapshotQuery.FullSnapshot fs = service.db().fullSnapshot(req.table(), req.ts());
+        resp.setContentType(MediaType.APPLICATION_JSON_VALUE);
+        resp.setCharacterEncoding(StandardCharsets.UTF_8.name());
+        try (JsonGenerator g = new JsonFactory().createGenerator(resp.getOutputStream())) {
+            g.writeStartObject();
+            g.writeNumberField("timestamp", fs.timestamp());
+            g.writeNumberField("totalRows", fs.totalRows());
+            g.writeArrayFieldStart("rows");
+            for (SnapshotQuery.Row row : fs.rows()) {
+                g.writeStartObject();
+                g.writeStringField("key", row.key());
+                g.writeArrayFieldStart("values");
+                for (Object v : row.values()) {
+                    g.writeObject(v);
+                }
+                g.writeEndArray();
+                g.writeEndObject();
+            }
+            g.writeEndArray();
+            g.writeEndObject();
+            g.flush();
+        }
     }
 
     @PostMapping("/getPointSeries")
@@ -110,7 +171,7 @@ public class DataController {
         for (int i = 0; i < files.size(); i++) {
             com.astradb.core.ingest.SnapshotData data;
             try (InputStream in = files.get(i).getInputStream()) {
-                data = com.astradb.core.ingest.CsvParser.parse(in, schema, true);
+                data = com.astradb.server.ingest.CsvParser.parse(in, schema, true);
             }
             snapshots.add(new SnapshotIngestor.BatchSnapshot(data, timestamps.get(i)));
         }

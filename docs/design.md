@@ -33,7 +33,7 @@
 9. **崩溃恢复**：`.seg` Footer 缺失/损坏 → 顺序扫描 chunk 按 CRC 截断到最后一个完整 chunk；点字典走临时文件 + 原子 rename；
 10. **保留期**：表级配置天数，定时任务整文件删除超期 `.seg`，同步更新 manifest。
 11. **时区分片**：按天分片时区可配置（`astradb.timezone`，缺省系统时区），保证数据文件日期与页面/数据时间戳一致；
-12. **导入入口解耦**：`SnapshotData`（列缓冲 record）为通用导入载体，CSV 与其他导入方式解析为同一 record 后复用同一落盘逻辑；
+12. **导入入口解耦**：`SnapshotData`（列缓冲 record）为通用导入载体；CSV 解析位于 **server**（`com.astradb.server.ingest.CsvParser`），解析为同一 record 后交给 core；core 只接收 `SnapshotData`/`BatchSnapshot`，导入前校验表结构与列类型一致。
 13. **段管理**：数据文件可查看段内快照时间戳（`listSegmentSnapshots`）与删除（`deleteSegment`，confirm + 路径穿越校验，不可恢复）；同段时间戳单调递增（乱序/重复拒绝，跨天回填允许）。
 14. **查询优化**：分页查询按行区间解码（`decodeRange`，只解码目标区间）+ LRU 列解压缓存（`ChunkCache`，上限 `astradb.query.cache-mb` 可配，默认 64MB，0 禁用），缓解同快照反复解压；点字典用开放寻址哈希紧凑化（落盘格式兼容）。
 
@@ -43,7 +43,7 @@
 AstraDB (Maven 多模块)
 ├── core    存储引擎：纯 Java，零 Spring 依赖（可独立单测与复用）
 │           元数据 / 列编码 / 压缩 / segment 读写 / 点字典 / manifest / 导入 / 查询 / 保留期
-├── server  Spring Boot 3：REST API + 导入编排 + 后台任务（启动初始化、保留期清理）
+├── server  Spring Boot 3：REST API + 导入编排（CSV 解析在此层）+ 后台任务（启动初始化、保留期清理）
 └── ui      管理页面：Thymeleaf 模板 + 原生 JS（表管理、导入、查询、统计）
 ```
 
@@ -59,7 +59,7 @@ com.astradb.core
 ├── segment     SegmentWriter / SegmentReader / Chunk / ChunkIndex / 文件头尾解析
 ├── points      PointDictionary（key → pointId，含落盘与内存态）
 ├── manifest    Manifest 读写与重建（扫描 segments/ 恢复）
-├── ingest      CsvParser（流式）、SnapshotData（通用列缓冲载体）、SnapshotIngestor（校验→编码→落盘编排）
+├── ingest      SnapshotData（通用列缓冲输入载体）、SnapshotIngestor（表结构/列类型校验→编码→落盘编排）
 ├── query       SnapshotQuery（按时间点全量）、PointSeriesQuery（单点历史）
 └── retention   RetentionCleaner（超期段清理）
 ```
@@ -201,7 +201,7 @@ interface ColumnCodec {
 
 ```
 1. 校验表存在、schema 冻结版本匹配、列数与列类型一致
-2. 数据源解析 → SnapshotData（列缓冲 record）；CSV 由 CsvParser 产出，其他方式（JSON 等）解析为同一 record
+2. 数据源解析 → SnapshotData（列缓冲 record）；CSV 由 **server 侧 CsvParser** 产出（core 不感知数据源格式），其他方式（JSON 等）解析为同一 record
 3. 校验主键快照内唯一；与点字典求并集，新点分配 pointId（内存态）
 4. 按 pointId 排序，值列按相同顺序重排
 5. 逐列编码（6.3）→ 压缩（6.5）
@@ -213,7 +213,7 @@ interface ColumnCodec {
 约束：
 
 - **时间戳单调递增**：同一 `.seg` 内快照时间戳必须严格递增（`SnapshotData`/CSV 入口均强制校验），保证 ChunkIndex 二分正确；乱序或重复时间戳拒绝导入。跨天（不同段）回填历史时间仍允许；
-- 导入入口解耦：`SnapshotIngestor.ingest(InputStream)`（CSV）与 `ingest(SnapshotData)`（通用）共用同一落盘逻辑，新增导入方式仅需实现"源 → SnapshotData"解析。
+- 导入入口解耦：CSV 解析位于 server，core 仅接收 `SnapshotData`/`BatchSnapshot` 并在导入前校验表结构与列类型（列数、逐列类型）一致；新增导入方式仅需实现"源 → SnapshotData"解析。
 
 并发：同表写串行（每表一个写队列，`.seg` 追加写单写者）；跨表独立；查询与写并发（读不阻塞写）。
 
@@ -282,6 +282,8 @@ interface ColumnCodec {
 | POST | `/api/deleteSegment` | 删除数据文件（不可恢复），请求体：table + path + confirm=true |
 | POST | `/api/listSegments` | 段文件列表，请求体：table |
 | POST | `/api/importSnapshots` | 批量导入：多 CSV + 严格递增 timestamps（multipart），一次落盘减少 fsync |
+| POST | `/api/importAsync` | 异步导入：同 importSnapshot，立即返回 `{taskId}`，后台执行（适合大文件） |
+| POST | `/api/importStatus` | 查询异步导入任务状态（RUNNING/SUCCESS/FAILED + rowCount/error） |
 | GET | `/api/health` | 健康检查：status/version/tables/dataDir/dataDirWritable/uptimeMs（鉴权开启时放行） |
 
 说明：所有操作均使用 POST；参数（除 `importSnapshot` 的 CSV 文件外）统一放入 JSON 请求体。
@@ -299,7 +301,8 @@ astradb:
   compression-level: 3        # 默认 zstd 压缩等级（1~22），建表时可表级覆盖
   timezone: Asia/Shanghai     # 按天分片时区（保证数据文件与页面时间戳一致）；缺省取系统时区
   query:
-    cache-mb: 64              # 查询列解压 LRU 缓存上限（MB；0 禁用；同快照多次分页/查询复用解压结果）
+    cache-mb: ${ASTRA_DB_QUERY_CACHE_MB:64}              # LRU 缓存上限（MB；0 禁用）
+  slow-query-threshold-ms: ${ASTRA_DB_SLOW_QUERY_THRESHOLD_MS:500}  # 慢查询日志阈值（ms）
   security:
     enabled: false            # API/页面鉴权（生产开启；默认关闭便于本地开发）
     username: admin
@@ -382,6 +385,18 @@ AstraDB/
 | CSV 排序内存优化 | 导入按 pointId 排序时跳过主键列重复 permute（主键列直接以排序后的 pointId 数组构建），省一次全列复制 |
 
 > 说明：以上均为已实施项；如后续追加新优化，继续在本节登记并标注状态。
+
+### 16.4 查询性能与运维优化（M6）
+
+| 项 | 实现 |
+|---|---|
+| 段句柄池化 | `SegmentChannelCache`：空闲 FileChannel LRU 池（活跃句柄出池，防误关）；`SegmentReader` 改为 FileChannel positional read（并发安全）；删除段/保留期清理前 evict |
+| 跨段并行查询 | `PointSeriesQuery` 候选段筛选后 ForkJoin 并行解码（段数≥2），结果按时间 k-way 归并，与串行一致 |
+| 流式大响应 | `getFullSnapshot` 用 Jackson `JsonGenerator` 直接写 response（整页不缓冲 JSON）；`getSnapshot` 分页保持 |
+| 统一错误码 | 错误体 `{code, message, timestamp, path}`；码：INVALID_ARGUMENT / INGEST_REJECTED / UNPARSEABLE_BODY / STORAGE_ERROR / INTERNAL_ERROR（message 保持展示语义） |
+| 慢查询日志 | `SlowQueryInterceptor`：`/api/**` 耗时超 `astradb.slow-query-threshold-ms`（默认 500ms）WARN（method/path/耗时/table） |
+| 配置外置 | 全部关键配置支持环境变量覆盖：`ASTRA_DB_DATA_DIR` / `ASTRA_DB_COMPRESSION_LEVEL` / `ASTRA_DB_TIMEZONE` / `ASTRA_DB_QUERY_CACHE_MB` / `ASTRA_DB_SLOW_QUERY_THRESHOLD_MS` / `ASTRA_DB_SECURITY_*` / `ASTRA_DB_PORT` / `ASTRA_DB_MAX_FILE_SIZE` |
+| 异步导入 | `POST /api/importAsync`（立即返回 taskId）+ `POST /api/importStatus`；线程池后台执行（输入为 SnapshotData，不依赖 multipart 临时文件）；页面导入栏异步模式轮询状态 |
 
 ---
 

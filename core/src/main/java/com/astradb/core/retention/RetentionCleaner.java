@@ -18,7 +18,8 @@ public final class RetentionCleaner {
     }
 
     /** @return 删除的段文件数 */
-    public static int clean(TableMeta table, Manifest manifest, long now) throws IOException {
+    public static int clean(TableMeta table, Manifest manifest, long now,
+                        com.astradb.core.segment.SegmentChannelCache channels) throws IOException {
         long cutoff = now - table.retentionDays() * 86_400_000L;
         List<Manifest.SegmentInfo> doomed = new ArrayList<>();
         for (Manifest.SegmentInfo s : manifest.segments()) {
@@ -28,6 +29,9 @@ public final class RetentionCleaner {
         }
         for (Manifest.SegmentInfo s : doomed) {
             Path p = table.dir().resolve(s.path());
+            if (channels != null) {
+                channels.evict(p);
+            }
             Files.deleteIfExists(p);
             manifest.remove(s.path());
         }

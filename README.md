@@ -16,7 +16,8 @@
 - **保留期**：表级配置天数，定时整文件清理超期段
 - **时区分片**：按天分片时区可配置（`astradb.timezone`），数据文件与页面时间戳一致
 - **数据文件管理**：段文件可查看段内快照时间戳、可单独删除（confirm 防误删、防路径穿越）
-- **性能优化**：查询按需解码（单点历史不构造整列数组）、批量导入（fsync 减少 ~60%）、百万行写入 1.5s
+- **性能优化**：查询按需解码（单点历史不构造整列数组）、批量导入（fsync 减少 ~60%）、百万行写入 1.5s、段句柄池化、跨段并行查询、全量快照流式输出
+- **可观测与运维**：统一错误码（code/message）、慢查询日志（阈值可配）、全部配置支持环境变量覆盖、异步导入任务（大文件不阻塞）
 - **schema 冻结**：建表即定列，杜绝历史数据漂移
 
 ## 部署与安全
@@ -53,7 +54,7 @@ docker compose up -d          # 数据卷 ./data、安全/时区经环境变量�
 
 ```
 AstraDB (Maven 多模块)
-├── core    存储引擎：纯 Java，零框架依赖（编码/压缩/段读写/恢复/元数据/导入/查询/保留期）
+├── core    存储引擎：纯 Java，零框架依赖（编码/压缩/段读写/恢复/元数据/导入校验/查询/保留期；仅接收 SnapshotData/BatchSnapshot）
 ├── server  Spring Boot 4 服务：REST API + 启动初始化 + 保留期定时任务
 └── ui      管理页面：Thymeleaf + 原生 JS（表管理/导入/查询/统计）
 ```
@@ -121,6 +122,8 @@ curl -X POST $BASE/api/getPointSeries -H 'Content-Type: application/json' \
 | `/api/listSegmentSnapshots` | 段内快照时间戳与行数（数据文件详情） |
 | `/api/deleteSegment` | 删除数据文件（需 `confirm: true`，不可恢复） |
 | `/api/importSnapshots` | 批量导入：多 CSV + 严格递增 timestamps（减少 fsync） |
+| `/api/importAsync` | 异步导入：立即返回 taskId，后台执行（适合大文件） |
+| `/api/importStatus` | 查询异步导入任务状态（RUNNING/SUCCESS/FAILED） |
 | `GET /api/health` | 健康检查（鉴权开启时放行） |
 
 ## 存储格式要点
@@ -140,7 +143,7 @@ curl -X POST $BASE/api/getPointSeries -H 'Content-Type: application/json' \
 ## 测试
 
 ```bash
-mvn test    # 63 项自动化测试（core 58 + server 5），含性能基准与鉴权用例
+mvn test    # 95 项自动化测试（core 79 + server 16），含性能基准/鉴权/并行/异步导入用例
 ```
 
 测试计划、用例、缺陷跟踪与报告见 [docs/test/](docs/test/)。
