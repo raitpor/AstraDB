@@ -10,6 +10,8 @@ import com.astradb.core.points.PointDictionary;
 import com.astradb.core.segment.Chunk;
 import com.astradb.core.segment.ChunkCodec;
 import com.astradb.core.segment.SegmentPaths;
+import com.astradb.core.segment.SegmentReader;
+import com.astradb.core.segment.SegmentRewriter;
 import com.astradb.core.segment.SegmentWriter;
 
 import java.io.IOException;
@@ -42,12 +44,12 @@ public final class SnapshotIngestor {
      */
     public static IngestResult ingest(TableMeta table, PointDictionary dict, Manifest manifest,
                                       Compressor compressor, SnapshotData data, Long timestamp,
-                                      java.time.ZoneId zone)
+                                      java.time.ZoneId zone, java.util.function.Consumer<java.nio.file.Path> evict)
             throws IOException {
         long ts = timestamp != null ? timestamp : System.currentTimeMillis();
         PreparedChunk p = prepare(table, dict, compressor, data, ts, zone);
         dict.flush(); // 先落盘点字典（fsync），再写 chunk
-        writeSegment(table, manifest, compressor, p, zone);
+        writeSegment(table, manifest, compressor, p, zone, evict);
         return new IngestResult(p.ts(), p.rowCount(), p.newPoints());
     }
 
@@ -62,7 +64,8 @@ public final class SnapshotIngestor {
      */
     public static List<IngestResult> ingestBatch(TableMeta table, PointDictionary dict, Manifest manifest,
                                                  Compressor compressor, List<BatchSnapshot> snapshots,
-                                                 java.time.ZoneId zone)
+                                                 java.time.ZoneId zone,
+                                                 java.util.function.Consumer<java.nio.file.Path> evict)
             throws IOException {
         if (snapshots == null || snapshots.isEmpty()) {
             throw new IngestException("批量导入为空");
@@ -85,7 +88,7 @@ public final class SnapshotIngestor {
             results.add(new IngestResult(ts, p.rowCount(), p.newPoints()));
         }
         dict.flush(); // 全部新点一次落盘
-        writeSegmentsBatch(table, manifest, compressor, prepared, zone);
+        writeSegmentsBatch(table, manifest, compressor, prepared, zone, evict);
         return results;
     }
 
@@ -169,18 +172,46 @@ public final class SnapshotIngestor {
                                  int newPoints, Path segPath) {
     }
 
-    /** 单快照写段 + manifest 更新。 */
+    /** 单快照写段 + manifest 更新。段存在时支持任意时间戳插入（尾部 append 快路径 / 中间重写合并）。 */
     private static void writeSegment(TableMeta table, Manifest manifest, Compressor compressor,
-                                     PreparedChunk p, java.time.ZoneId zone)
+                                     PreparedChunk p, java.time.ZoneId zone,
+                                     java.util.function.Consumer<java.nio.file.Path> evict)
             throws IOException {
         Schema schema = table.schema();
         Path segPath = p.segPath();
-        SegmentWriter writer = Files.exists(segPath)
-                ? SegmentWriter.openAppend(segPath, schema.version(), schema.columnCount())
-                : SegmentWriter.create(segPath, SegmentPaths.dayStart(p.ts(), zone), schema.version(), schema.columnCount());
-        try (SegmentWriter w = writer) {
-            w.append(p.chunkBytes(), p.ts(), p.rowCount());
+        if (!Files.exists(segPath)) {
+            try (SegmentWriter w = SegmentWriter.create(segPath, SegmentPaths.dayStart(p.ts(), zone),
+                    schema.version(), schema.columnCount())) {
+                w.append(p.chunkBytes(), p.ts(), p.rowCount());
+            }
+            mergeSegmentInfo(manifest, table, segPath, SegmentPaths.dayStart(p.ts(), zone), p.ts(),
+                    1, p.rowCount(), p.minKey(), p.maxKey(), Files.size(segPath));
+            manifest.save();
+            return;
         }
+        // 段存在：定位目标时间戳
+        try (SegmentReader r = SegmentReader.open(segPath, null)) {
+            int idx = r.findChunkAtOrBefore(p.ts());
+            if (idx >= 0 && r.timestampAt(idx) == p.ts()) {
+                throw new IngestException("时间戳已存在（重复快照）: " + p.ts());
+            }
+            if (r.chunkCount() == 0 || r.timestampAt(r.chunkCount() - 1) < p.ts()) {
+                // 尾部追加：快路径（仅 fsync 一次）
+                try (SegmentWriter w = SegmentWriter.openAppend(segPath, schema.version(), schema.columnCount())) {
+                    w.append(p.chunkBytes(), p.ts(), p.rowCount());
+                }
+                mergeSegmentInfo(manifest, table, segPath, SegmentPaths.dayStart(p.ts(), zone), p.ts(),
+                        1, p.rowCount(), p.minKey(), p.maxKey(), Files.size(segPath));
+                manifest.save();
+                return;
+            }
+        }
+        // 中间空洞：重写合并（reader 已关闭；低频回填，接受 O(段大小) 开销）
+        SegmentRewriter.rewrite(
+                segPath, SegmentPaths.dayStart(p.ts(), zone), schema.version(), schema.columnCount(),
+                java.util.Set.of(), List.of(new SegmentRewriter.NewChunk(p.chunkBytes(), p.ts(), p.rowCount())));
+        evict.accept(segPath);
+        // 新增量（mergeSegmentInfo 按追加语义累加到旧值）
         mergeSegmentInfo(manifest, table, segPath, SegmentPaths.dayStart(p.ts(), zone), p.ts(),
                 1, p.rowCount(), p.minKey(), p.maxKey(), Files.size(segPath));
         manifest.save();
@@ -188,7 +219,8 @@ public final class SnapshotIngestor {
 
     /** 批量写段：同段共享写入器（close/fsync 一次），manifest 汇总保存一次。 */
     private static void writeSegmentsBatch(TableMeta table, Manifest manifest, Compressor compressor,
-                                           List<PreparedChunk> prepared, java.time.ZoneId zone)
+                                           List<PreparedChunk> prepared, java.time.ZoneId zone,
+                                           java.util.function.Consumer<java.nio.file.Path> evict)
             throws IOException {
         Schema schema = table.schema();
         Map<Path, List<PreparedChunk>> bySeg = new LinkedHashMap<>();
@@ -198,33 +230,66 @@ public final class SnapshotIngestor {
         for (Map.Entry<Path, List<PreparedChunk>> e : bySeg.entrySet()) {
             Path segPath = e.getKey();
             List<PreparedChunk> chunks = e.getValue();
-            SegmentWriter writer = Files.exists(segPath)
-                    ? SegmentWriter.openAppend(segPath, schema.version(), schema.columnCount())
-                    : SegmentWriter.create(segPath, SegmentPaths.dayStart(chunks.get(0).ts(), zone),
-                    schema.version(), schema.columnCount());
-            try (SegmentWriter w = writer) {
-                for (PreparedChunk p : chunks) {
-                    w.append(p.chunkBytes(), p.ts(), p.rowCount());
-                }
-            }
-            int chunkCount = 0;
             int minKey = Integer.MAX_VALUE;
             int maxKey = Integer.MIN_VALUE;
             long rows = 0;
             for (PreparedChunk p : chunks) {
-                chunkCount++;
                 rows += p.rowCount();
                 minKey = Math.min(minKey, p.minKey());
                 maxKey = Math.max(maxKey, p.maxKey());
             }
+            if (!Files.exists(segPath)) {
+                try (SegmentWriter w = SegmentWriter.create(segPath,
+                        SegmentPaths.dayStart(chunks.get(0).ts(), zone), schema.version(), schema.columnCount())) {
+                    for (PreparedChunk p : chunks) {
+                        w.append(p.chunkBytes(), p.ts(), p.rowCount());
+                    }
+                }
+                mergeSegmentInfo(manifest, table, segPath,
+                        SegmentPaths.dayStart(chunks.get(0).ts(), zone), chunks.get(chunks.size() - 1).ts(),
+                        chunks.size(), rows, minKey, maxKey, Files.size(segPath));
+                continue;
+            }
+            // 段存在：校验批内与旧段时间戳重复，再决定 append 快路径或重写合并
+            boolean needRewrite;
+            try (SegmentReader r = SegmentReader.open(segPath, null)) {
+                for (PreparedChunk p : chunks) {
+                    int idx = r.findChunkAtOrBefore(p.ts());
+                    if (idx >= 0 && r.timestampAt(idx) == p.ts()) {
+                        throw new IngestException("时间戳已存在（重复快照）: " + p.ts());
+                    }
+                }
+                needRewrite = r.chunkCount() > 0 && r.timestampAt(r.chunkCount() - 1) >= chunks.get(0).ts();
+                if (!needRewrite) {
+                    // 全部落在段尾：追加快路径
+                    try (SegmentWriter w = SegmentWriter.openAppend(segPath, schema.version(), schema.columnCount())) {
+                        for (PreparedChunk p : chunks) {
+                            w.append(p.chunkBytes(), p.ts(), p.rowCount());
+                        }
+                    }
+                    mergeSegmentInfo(manifest, table, segPath,
+                            SegmentPaths.dayStart(chunks.get(0).ts(), zone), chunks.get(chunks.size() - 1).ts(),
+                            chunks.size(), rows, minKey, maxKey, Files.size(segPath));
+                    continue;
+                }
+            }
+            // 落入段中间：reader 已关闭，该段一次性重写合并
+            List<SegmentRewriter.NewChunk> newChunks = new ArrayList<>(chunks.size());
+            for (PreparedChunk p : chunks) {
+                newChunks.add(new SegmentRewriter.NewChunk(p.chunkBytes(), p.ts(), p.rowCount()));
+            }
+            SegmentRewriter.rewrite(segPath, SegmentPaths.dayStart(chunks.get(0).ts(), zone),
+                    schema.version(), schema.columnCount(), java.util.Set.of(), newChunks);
+            evict.accept(segPath);
+            // 新增量（mergeSegmentInfo 按追加语义累加）
             mergeSegmentInfo(manifest, table, segPath,
                     SegmentPaths.dayStart(chunks.get(0).ts(), zone), chunks.get(chunks.size() - 1).ts(),
-                    chunkCount, rows, minKey, maxKey, Files.size(segPath));
+                    chunks.size(), rows, minKey, maxKey, Files.size(segPath));
         }
         manifest.save();
     }
 
-    /** manifest 段信息合并（含旧值累计）。 */
+    /** manifest 段信息合并（含旧值累计：chunkCount/rows 累加，min/max 并集，endTime 取 max，startTime 取 min）。 */
     private static void mergeSegmentInfo(Manifest manifest, TableMeta table, Path segPath,
                                          long startTime, long endTime, int chunkCount, long rows,
                                          int minKey, int maxKey, long sizeBytes) {
@@ -236,8 +301,10 @@ public final class SnapshotIngestor {
                 break;
             }
         }
+        long newStart = old == null ? startTime : Math.min(old.startTime(), startTime);
+        long newEnd = old == null ? endTime : Math.max(old.endTime(), endTime);
         Manifest.SegmentInfo si = new Manifest.SegmentInfo(
-                rel, startTime, endTime,
+                rel, newStart, newEnd,
                 (old == null ? 0 : old.chunkCount()) + chunkCount,
                 (old == null ? 0 : old.rows()) + rows,
                 Math.min(old == null ? Integer.MAX_VALUE : old.minKey(), minKey),

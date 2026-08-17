@@ -18,6 +18,7 @@ import com.astradb.core.retention.RetentionCleaner;
 import com.astradb.core.segment.SegmentChannelCache;
 import com.astradb.core.segment.SegmentPaths;
 import com.astradb.core.segment.SegmentReader;
+import com.astradb.core.segment.SegmentRewriter;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -173,6 +174,13 @@ public final class AstraDB implements AutoCloseable {
         Set<String> disk = new HashSet<>();
         List<Manifest.SegmentInfo> diskInfos = new ArrayList<>();
         if (Files.isDirectory(segRoot)) {
+            // 清理重写中断残留的临时文件（*.tmp，启动校验只扫 .seg）
+            try (Stream<Path> walk = Files.walk(segRoot)) {
+                for (Path p : walk.filter(Files::isRegularFile)
+                        .filter(p -> p.getFileName().toString().endsWith(".tmp")).toList()) {
+                    Files.deleteIfExists(p);
+                }
+            }
             try (Stream<Path> walk = Files.walk(segRoot)) {
                 for (Path p : walk.filter(Files::isRegularFile)
                         .filter(p -> p.getFileName().toString().endsWith(".seg")).toList()) {
@@ -362,7 +370,8 @@ public final class AstraDB implements AutoCloseable {
         TableState st = stateOf(name);
         st.lock.writeLock().lock();
         try {
-            return SnapshotIngestor.ingest(st.meta, st.dict, st.manifest, st.compressor, data, timestamp, zone);
+            return SnapshotIngestor.ingest(st.meta, st.dict, st.manifest, st.compressor, data, timestamp, zone,
+                segmentChannels::evict);
         } finally {
             st.lock.writeLock().unlock();
         }
@@ -375,7 +384,8 @@ public final class AstraDB implements AutoCloseable {
         TableState st = stateOf(name);
         st.lock.writeLock().lock();
         try {
-            return SnapshotIngestor.ingestBatch(st.meta, st.dict, st.manifest, st.compressor, snapshots, zone);
+            return SnapshotIngestor.ingestBatch(st.meta, st.dict, st.manifest, st.compressor, snapshots, zone,
+                segmentChannels::evict);
         } finally {
             st.lock.writeLock().unlock();
         }
@@ -503,6 +513,54 @@ public final class AstraDB implements AutoCloseable {
             segmentChannels.evict(seg);
             Files.deleteIfExists(seg);
             st.manifest.remove(relativePath);
+            st.manifest.save();
+        } finally {
+            st.lock.writeLock().unlock();
+        }
+    }
+
+    /** 删除指定时间点的快照（不可恢复，需 confirm=true）：段重写过滤该 chunk，段内时间戳保持有序。 */
+    public void deleteSnapshot(String name, long ts, boolean confirm) throws IOException {
+        if (!confirm) {
+            throw new IllegalArgumentException("删除快照不可恢复，需携带 confirm=true");
+        }
+        TableState st = stateOf(name);
+        st.lock.writeLock().lock();
+        try {
+            Manifest.SegmentInfo seg = null;
+            for (Manifest.SegmentInfo s : st.manifest.segments()) {
+                if (s.startTime() <= ts && ts <= s.endTime()) {
+                    seg = s;
+                    break;
+                }
+            }
+            if (seg == null) {
+                throw new IllegalArgumentException("快照不存在: " + ts);
+            }
+            Path segPath = st.meta.dir().resolve(seg.path());
+            Schema schema = st.meta.schema();
+            // 定位并确认目标时间戳在段内
+            boolean found = false;
+            try (SegmentReader r = SegmentReader.open(segPath, segmentChannels)) {
+                int idx = r.findChunkAtOrBefore(ts);
+                found = idx >= 0 && r.timestampAt(idx) == ts;
+            }
+            if (!found) {
+                throw new IllegalArgumentException("快照不存在: " + ts);
+            }
+            SegmentRewriter.RewriteResult res = SegmentRewriter.rewrite(
+                    segPath, SegmentPaths.dayStart(ts, zone), schema.version(), schema.columnCount(),
+                    java.util.Set.of(ts), List.of());
+            segmentChannels.evict(segPath);
+            if (res.isEmpty()) {
+                Files.deleteIfExists(segPath);
+                st.manifest.remove(seg.path());
+            } else {
+                // 删除后窗口精确重算（minKey/maxKey/endTime 可能收缩）
+                Manifest.SegmentInfo precise = describeSegmentPrecise(st.meta, segPath, seg.path(),
+                        st.compressor, segmentChannels);
+                st.manifest.addOrMerge(precise);
+            }
             st.manifest.save();
         } finally {
             st.lock.writeLock().unlock();

@@ -113,7 +113,7 @@ curl -X POST $BASE/api/getPointSeries -H 'Content-Type: application/json' \
 | `/api/listTables` | 表列表 |
 | `/api/getTableInfo` | 表详情 |
 | `/api/deleteTable` | 删表（需 `confirm: true`，不可恢复） |
-| `/api/importSnapshot` | 导入快照（multipart CSV + 可选 timestamp） |
+| `/api/importSnapshot` | 导入快照（multipart CSV + 可选 timestamp；可向段内任意不存在时间戳回填，段重写保持有序） |
 | `/api/listSnapshots` | 快照时间点列表 |
 | `/api/getSnapshot` | 全量快照（分页） |
 | `/api/getFullSnapshot` | 全量快照（不分页，一次返回该时间点全部行） |
@@ -121,6 +121,7 @@ curl -X POST $BASE/api/getPointSeries -H 'Content-Type: application/json' \
 | `/api/getTableStats` | 存储/压缩率统计 |
 | `/api/listSegmentSnapshots` | 段内快照时间戳与行数（数据文件详情） |
 | `/api/deleteSegment` | 删除数据文件（需 `confirm: true`，不可恢复） |
+| `/api/deleteSnapshot` | 删除指定时间点快照（需 `confirm: true`，段重写保持有序） |
 | `/api/importSnapshots` | 批量导入：多 CSV + 严格递增 timestamps（减少 fsync） |
 | `/api/importAsync` | 异步导入：立即返回 taskId，后台执行（适合大文件） |
 | `/api/importStatus` | 查询异步导入任务状态（RUNNING/SUCCESS/FAILED） |
@@ -143,7 +144,7 @@ curl -X POST $BASE/api/getPointSeries -H 'Content-Type: application/json' \
 ## 测试
 
 ```bash
-mvn test    # 95 项自动化测试（core 79 + server 16），含性能基准/鉴权/并行/异步导入用例
+mvn test    # 99 项自动化测试（core 83 + server 16），含性能基准/鉴权/并行/异步导入/回填删除用例
 ```
 
 测试计划、用例、缺陷跟踪与报告见 [docs/test/](docs/test/)。

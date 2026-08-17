@@ -48,6 +48,9 @@ public class DataController {
     public record FullSnapshotRequest(String table, long ts) {
     }
 
+    public record DeleteSnapshotRequest(String table, long ts, Boolean confirm) {
+    }
+
     public record SeriesRequest(String table, String key, long from, long to, int limit) {
     }
 
@@ -137,6 +140,13 @@ public class DataController {
     @PostMapping("/getPointSeries")
     public List<PointSeriesQuery.PointRecord> getPointSeries(@RequestBody SeriesRequest req) throws IOException {
         return service.db().series(req.table(), req.key(), req.from(), req.to(), req.limit());
+    }
+
+    /** 删除指定时间点的快照（不可恢复，需 confirm=true）。 */
+    @PostMapping("/deleteSnapshot")
+    public Map<String, Object> deleteSnapshot(@RequestBody DeleteSnapshotRequest req) throws IOException {
+        service.db().deleteSnapshot(req.table(), req.ts(), Boolean.TRUE.equals(req.confirm()));
+        return Map.of("deleted", true, "table", req.table(), "ts", req.ts());
     }
 
     /** 段内快照时间戳与行数（数据文件查看）。 */

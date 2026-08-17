@@ -34,7 +34,7 @@
 10. **保留期**：表级配置天数，定时任务整文件删除超期 `.seg`，同步更新 manifest。
 11. **时区分片**：按天分片时区可配置（`astradb.timezone`，缺省系统时区），保证数据文件日期与页面/数据时间戳一致；
 12. **导入入口解耦**：`SnapshotData`（列缓冲 record）为通用导入载体；CSV 解析位于 **server**（`com.astradb.server.ingest.CsvParser`），解析为同一 record 后交给 core；core 只接收 `SnapshotData`/`BatchSnapshot`，导入前校验表结构与列类型一致。
-13. **段管理**：数据文件可查看段内快照时间戳（`listSegmentSnapshots`）与删除（`deleteSegment`，confirm + 路径穿越校验，不可恢复）；同段时间戳单调递增（乱序/重复拒绝，跨天回填允许）。
+13. **段管理**：数据文件可查看段内快照时间戳（`listSegmentSnapshots`）、删除整个数据文件（`deleteSegment`，confirm + 路径穿越校验）与**删除指定时间点快照**（`deleteSnapshot`，confirm，段重写过滤）；**同段时间戳唯一**——可向段内任意不存在的时间戳回填插入（中间插入经段重写，段内始终按时间有序），重复时间戳拒绝。
 14. **查询优化**：分页查询按行区间解码（`decodeRange`，只解码目标区间）+ LRU 列解压缓存（`ChunkCache`，上限 `astradb.query.cache-mb` 可配，默认 64MB，0 禁用），缓解同快照反复解压；点字典用开放寻址哈希紧凑化（落盘格式兼容）。
 
 ## 3. 总体架构
@@ -212,7 +212,7 @@ interface ColumnCodec {
 
 约束：
 
-- **时间戳单调递增**：同一 `.seg` 内快照时间戳必须严格递增（`SnapshotData`/CSV 入口均强制校验），保证 ChunkIndex 二分正确；乱序或重复时间戳拒绝导入。跨天（不同段）回填历史时间仍允许；
+- **时间戳唯一（可任意位置回填）**：同一 `.seg` 内快照时间戳必须唯一（`SnapshotData`/CSV 入口均强制校验）。尾部新快照直接追加（快路径）；落在段内**任意不存在的时间戳**经**段重写**插入（旧 chunk 原样复制 + 新 chunk 按时间升序合并，原子替换），段内保持有序、ChunkIndex 二分持续有效；重复时间戳拒绝。跨天（不同段）回填不受影响；
 - 导入入口解耦：CSV 解析位于 server，core 仅接收 `SnapshotData`/`BatchSnapshot` 并在导入前校验表结构与列类型（列数、逐列类型）一致；新增导入方式仅需实现"源 → SnapshotData"解析。
 
 并发：同表写串行（每表一个写队列，`.seg` 追加写单写者）；跨表独立；查询与写并发（读不阻塞写）。
@@ -280,6 +280,7 @@ interface ColumnCodec {
 | POST | `/api/getTableStats` | 存储/压缩率统计，请求体：table |
 | POST | `/api/listSegmentSnapshots` | 段内快照时间戳与行数（数据文件详情），请求体：table + path |
 | POST | `/api/deleteSegment` | 删除数据文件（不可恢复），请求体：table + path + confirm=true |
+| POST | `/api/deleteSnapshot` | 删除指定时间点快照（不可恢复，段重写），请求体：table + ts + confirm=true |
 | POST | `/api/listSegments` | 段文件列表，请求体：table |
 | POST | `/api/importSnapshots` | 批量导入：多 CSV + 严格递增 timestamps（multipart），一次落盘减少 fsync |
 | POST | `/api/importAsync` | 异步导入：同 importSnapshot，立即返回 `{taskId}`，后台执行（适合大文件） |
@@ -404,9 +405,10 @@ AstraDB/
 
 - 建表后 schema 冻结：导入列数/类型/主键列不匹配 → 400 拒绝，不产生任何文件写入；
 - 快照内主键重复 → 400 拒绝整批导入（不做部分成功）；
-- 时间戳回填历史：允许写任意历史日期（按天分片），但同一段内时间戳必须单调递增——乱序/重复 → 400 拒绝（防止 ChunkIndex 二分失效）；跨天回填不受影响；
+- 时间戳回填：允许向任意历史日期（按天分片）与段内任意不存在的时间戳回填；中间插入经段重写（O(段大小)，低频操作），段内保持时间有序；**重复时间戳 → 400 拒绝**（幂等冲突）；
 - 单点查询 key 不存在 → 200 空序列（非错误）；
 - 内存压力：点字典载入超预算时告警，不自动扩容策略（点集缓慢增长，预留余量）；
 - 命名约束：表名/列名/主键值采用 UTF-8，禁止路径分隔符（`/`、`\`）与控制字符；
 - 删表语义：直接删除 `data/<表>` 目录，不可恢复；`deleteTable` 需携带 `confirm=true` 二次确认；
-- 段文件删除：`deleteSegment` 需 `confirm=true`；段路径仅允许 `segments/` 目录内相对路径（防路径穿越），删除后同步 manifest。
+- 段文件删除：`deleteSegment` 需 `confirm=true`；段路径仅允许 `segments/` 目录内相对路径（防路径穿越），删除后同步 manifest；
+- 快照删除：`deleteSnapshot` 需 `confirm=true`；段内无该时间点 → 400；删除后段内剩余快照保持有序，窗口（minKey/maxKey/endTime/rows）精确重算；段空则移除段文件；点字典 pointId 不回收（只增契约）。

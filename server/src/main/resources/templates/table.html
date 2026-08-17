@@ -162,9 +162,10 @@
                 body.innerHTML = '<div class="hint">段内无快照</div>';
             } else {
                 let html = `<div class="hint">共 ${list.length} 个快照</div>
-                    <table><thead><tr><th>#</th><th>本地时间</th><th>时间戳（毫秒）</th><th>行数</th></tr></thead><tbody>`;
+                    <table><thead><tr><th>#</th><th>本地时间</th><th>时间戳（毫秒）</th><th>行数</th><th>操作</th></tr></thead><tbody>`;
                 list.forEach((s, i) => {
-                    html += `<tr><td>${i + 1}</td><td>${fmtTime(s.timestamp)}</td><td>${s.timestamp}</td><td>${s.rows}</td></tr>`;
+                    html += `<tr><td>${i + 1}</td><td>${fmtTime(s.timestamp)}</td><td>${s.timestamp}</td><td>${s.rows}</td>`
+                        + `<td><button class="danger" onclick="deleteSnapshotAt(${s.timestamp}, '${path}')">删除</button></td></tr>`;
                 });
                 html += '</tbody></table>';
                 body.innerHTML = html;
@@ -184,6 +185,16 @@
         try {
             await api('/api/deleteSegment', {table: tableName, path, confirm: true});
             loadSegments(); loadInfo();
+        } catch (e) {
+            alert('删除失败: ' + e);
+        }
+    }
+
+    async function deleteSnapshotAt(ts, path) {
+        if (!confirm('确认删除该时间点的快照（' + fmtTime(ts) + '）？此操作不可恢复！')) return;
+        try {
+            await api('/api/deleteSnapshot', {table: tableName, ts, confirm: true});
+            showSegmentSnapshots(path); loadSegments(); loadInfo();
         } catch (e) {
             alert('删除失败: ' + e);
         }
