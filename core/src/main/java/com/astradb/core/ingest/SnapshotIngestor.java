@@ -17,9 +17,10 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -53,12 +54,58 @@ public final class SnapshotIngestor {
                                       Compressor compressor, SnapshotData data, Long timestamp,
                                       java.time.ZoneId zone)
             throws IOException {
+        long ts = timestamp != null ? timestamp : System.currentTimeMillis();
+        PreparedChunk p = prepare(table, dict, compressor, data, ts, zone);
+        dict.flush(); // 先落盘点字典（fsync），再写 chunk
+        writeSegment(table, manifest, compressor, p, zone);
+        return new IngestResult(p.ts(), p.rowCount(), p.newPoints());
+    }
+
+    /** 批量导入的单个快照（显式时间戳，须严格递增）。 */
+    public record BatchSnapshot(SnapshotData data, Long timestamp) {
+    }
+
+    /**
+     * 批量导入：多个快照一次完成校验/点分配（dict 落盘一次）、同段共享写入器
+     * （每段 fsync 一次）、manifest 末尾保存一次——大幅减少 fsync 次数。
+     * 崩溃语义与单快照一致：dict 先落盘，未完成段由恢复截断丢弃。
+     */
+    public static List<IngestResult> ingestBatch(TableMeta table, PointDictionary dict, Manifest manifest,
+                                                 Compressor compressor, List<BatchSnapshot> snapshots,
+                                                 java.time.ZoneId zone)
+            throws IOException {
+        if (snapshots == null || snapshots.isEmpty()) {
+            throw new IngestException("批量导入为空");
+        }
+        List<PreparedChunk> prepared = new ArrayList<>(snapshots.size());
+        List<IngestResult> results = new ArrayList<>(snapshots.size());
+        long prevTs = Long.MIN_VALUE;
+        for (int i = 0; i < snapshots.size(); i++) {
+            BatchSnapshot bs = snapshots.get(i);
+            if (bs.timestamp() == null) {
+                throw new IngestException("批量导入须显式提供每个快照的时间戳（第 " + (i + 1) + " 个）");
+            }
+            long ts = bs.timestamp();
+            if (ts <= prevTs) {
+                throw new IngestException("批量导入时间戳须严格递增（第 " + (i + 1) + " 个）");
+            }
+            prevTs = ts;
+            PreparedChunk p = prepare(table, dict, compressor, bs.data(), ts, zone);
+            prepared.add(p);
+            results.add(new IngestResult(ts, p.rowCount(), p.newPoints()));
+        }
+        dict.flush(); // 全部新点一次落盘
+        writeSegmentsBatch(table, manifest, compressor, prepared, zone);
+        return results;
+    }
+
+    /** 单快照：校验/分配/排序/编码为 chunk 字节（不落盘点字典）。 */
+    private static PreparedChunk prepare(TableMeta table, PointDictionary dict, Compressor compressor,
+                                         SnapshotData data, long ts, java.time.ZoneId zone) {
         Schema schema = table.schema();
         if (data.columns().size() != schema.columnCount()) {
             throw new IngestException("列数不符：期望 " + schema.columnCount() + "，实际 " + data.columns().size());
         }
-        long ts = timestamp != null ? timestamp : System.currentTimeMillis();
-
         List<Column> columns = data.columns();
         int n = data.rowCount();
         if (n == 0) {
@@ -96,13 +143,14 @@ public final class SnapshotIngestor {
             }
             pointIds[i] = id;
         }
-        dict.flush(); // 先落盘点字典（fsync），再写 chunk
 
-        // 4. 按 pointId 排序重排所有列；主键列替换为 pointId 列
+        // 4. 按 pointId 排序重排所有列；主键列替换为 pointId 列（跳过主键列 permute 避免重复复制）
         int[] order = sortIndex(pointIds);
         Column[] sorted = new Column[columns.size()];
         for (int i = 0; i < columns.size(); i++) {
-            sorted[i] = columns.get(i).permute(order);
+            if (i != pkIndex) {
+                sorted[i] = columns.get(i).permute(order);
+            }
         }
         int[] sortedIds = new int[n];
         for (int i = 0; i < n; i++) {
@@ -114,16 +162,74 @@ public final class SnapshotIngestor {
         Chunk chunk = new Chunk(ts, schema.version(), List.of(sorted));
         byte[] chunkBytes = ChunkCodec.encode(chunk, compressor);
 
-        // 6. 追加写当天段
-        Path segPath = SegmentPaths.pathFor(table.dir(), ts, zone);
+        return new PreparedChunk(chunkBytes, ts, n, sortedIds[0], sortedIds[n - 1], newPoints,
+                SegmentPaths.pathFor(table.dir(), ts, zone));
+    }
+
+    /** 已编码快照：待写段。 */
+    private record PreparedChunk(byte[] chunkBytes, long ts, int rowCount, int minKey, int maxKey,
+                                 int newPoints, Path segPath) {
+    }
+
+    /** 单快照写段 + manifest 更新。 */
+    private static void writeSegment(TableMeta table, Manifest manifest, Compressor compressor,
+                                     PreparedChunk p, java.time.ZoneId zone)
+            throws IOException {
+        Schema schema = table.schema();
+        Path segPath = p.segPath();
         SegmentWriter writer = Files.exists(segPath)
                 ? SegmentWriter.openAppend(segPath, schema.version(), schema.columnCount())
-                : SegmentWriter.create(segPath, SegmentPaths.dayStart(ts, zone), schema.version(), schema.columnCount());
+                : SegmentWriter.create(segPath, SegmentPaths.dayStart(p.ts(), zone), schema.version(), schema.columnCount());
         try (SegmentWriter w = writer) {
-            w.append(chunkBytes, ts, n);
+            w.append(p.chunkBytes(), p.ts(), p.rowCount());
         }
+        mergeSegmentInfo(manifest, table, segPath, SegmentPaths.dayStart(p.ts(), zone), p.ts(),
+                1, p.rowCount(), p.minKey(), p.maxKey(), Files.size(segPath));
+        manifest.save();
+    }
 
-        // 7. manifest 更新（段级信息合并）
+    /** 批量写段：同段共享写入器（close/fsync 一次），manifest 汇总保存一次。 */
+    private static void writeSegmentsBatch(TableMeta table, Manifest manifest, Compressor compressor,
+                                           List<PreparedChunk> prepared, java.time.ZoneId zone)
+            throws IOException {
+        Schema schema = table.schema();
+        Map<Path, List<PreparedChunk>> bySeg = new LinkedHashMap<>();
+        for (PreparedChunk p : prepared) {
+            bySeg.computeIfAbsent(p.segPath(), k -> new ArrayList<>()).add(p);
+        }
+        for (Map.Entry<Path, List<PreparedChunk>> e : bySeg.entrySet()) {
+            Path segPath = e.getKey();
+            List<PreparedChunk> chunks = e.getValue();
+            SegmentWriter writer = Files.exists(segPath)
+                    ? SegmentWriter.openAppend(segPath, schema.version(), schema.columnCount())
+                    : SegmentWriter.create(segPath, SegmentPaths.dayStart(chunks.get(0).ts(), zone),
+                    schema.version(), schema.columnCount());
+            try (SegmentWriter w = writer) {
+                for (PreparedChunk p : chunks) {
+                    w.append(p.chunkBytes(), p.ts(), p.rowCount());
+                }
+            }
+            int chunkCount = 0;
+            int minKey = Integer.MAX_VALUE;
+            int maxKey = Integer.MIN_VALUE;
+            long rows = 0;
+            for (PreparedChunk p : chunks) {
+                chunkCount++;
+                rows += p.rowCount();
+                minKey = Math.min(minKey, p.minKey());
+                maxKey = Math.max(maxKey, p.maxKey());
+            }
+            mergeSegmentInfo(manifest, table, segPath,
+                    SegmentPaths.dayStart(chunks.get(0).ts(), zone), chunks.get(chunks.size() - 1).ts(),
+                    chunkCount, rows, minKey, maxKey, Files.size(segPath));
+        }
+        manifest.save();
+    }
+
+    /** manifest 段信息合并（含旧值累计）。 */
+    private static void mergeSegmentInfo(Manifest manifest, TableMeta table, Path segPath,
+                                         long startTime, long endTime, int chunkCount, long rows,
+                                         int minKey, int maxKey, long sizeBytes) {
         String rel = SegmentPaths.relative(segPath, table.dir());
         Manifest.SegmentInfo old = null;
         for (Manifest.SegmentInfo s : manifest.segments()) {
@@ -132,19 +238,14 @@ public final class SnapshotIngestor {
                 break;
             }
         }
-        int minKey = sortedIds[0];
-        int maxKey = sortedIds[n - 1];
         Manifest.SegmentInfo si = new Manifest.SegmentInfo(
-                rel, SegmentPaths.dayStart(ts, zone), ts,
-                (old == null ? 0 : old.chunkCount()) + 1,
-                (old == null ? 0 : old.rows()) + n,
+                rel, startTime, endTime,
+                (old == null ? 0 : old.chunkCount()) + chunkCount,
+                (old == null ? 0 : old.rows()) + rows,
                 Math.min(old == null ? Integer.MAX_VALUE : old.minKey(), minKey),
                 Math.max(old == null ? -1 : old.maxKey(), maxKey),
-                Files.size(segPath));
+                sizeBytes);
         manifest.addOrMerge(si);
-        manifest.save();
-
-        return new IngestResult(ts, n, newPoints);
     }
 
     private static String primaryKeyString(Column pk, int i) {
@@ -156,18 +257,65 @@ public final class SnapshotIngestor {
         };
     }
 
-    /** 按 keys 升序返回索引排列（临时装箱可接受，非驻留对象）。 */
+    /**
+     * 按 keys 升序返回索引排列（原始类型快排，三数取中 + 尾递归优化，
+     * 替代 Integer[] 装箱排序，避免 20 万行临时装箱对象）。
+     */
     private static int[] sortIndex(int[] keys) {
-        Integer[] idx = new Integer[keys.length];
-        for (int i = 0; i < keys.length; i++) {
+        int n = keys.length;
+        int[] idx = new int[n];
+        for (int i = 0; i < n; i++) {
             idx[i] = i;
         }
-        Arrays.sort(idx, (a, b) -> Integer.compare(keys[a], keys[b]));
-        int[] out = new int[keys.length];
-        for (int i = 0; i < keys.length; i++) {
-            out[i] = idx[i];
+        quickSort(keys, idx, 0, n - 1);
+        return idx;
+    }
+
+    private static void quickSort(int[] keys, int[] idx, int lo, int hi) {
+        while (lo < hi) {
+            int p = partition(keys, idx, lo, hi);
+            // 递归较小段，迭代较大段，控制递归栈深
+            if (p - lo < hi - p) {
+                quickSort(keys, idx, lo, p - 1);
+                lo = p + 1;
+            } else {
+                quickSort(keys, idx, p + 1, hi);
+                hi = p - 1;
+            }
         }
-        return out;
+    }
+
+    private static int partition(int[] keys, int[] idx, int lo, int hi) {
+        int mid = (lo + hi) >>> 1;
+        // 三数取中选主元
+        int a = keys[idx[lo]];
+        int b = keys[idx[mid]];
+        int c = keys[idx[hi]];
+        int pivotPos;
+        if (a < b) {
+            pivotPos = b < c ? mid : (a < c ? hi : lo);
+        } else {
+            pivotPos = a < c ? lo : (b < c ? hi : mid);
+        }
+        int pivot = keys[idx[pivotPos]];
+        swap(idx, pivotPos, hi);
+        int i = lo;
+        for (int j = lo; j < hi; j++) {
+            if (keys[idx[j]] < pivot) {
+                swap(idx, i, j);
+                i++;
+            }
+        }
+        swap(idx, i, hi);
+        return i;
+    }
+
+    private static void swap(int[] idx, int a, int b) {
+        if (a != b) {
+            int t = idx[a];
+            idx[a] = idx[b];
+            idx[b] = t;
+        }
     }
 
     /** 导入失败（主键重复/列不匹配/空快照等）。 */

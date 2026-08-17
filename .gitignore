@@ -1,6 +1,7 @@
 .m2-repository/
 target/
 .reasonix/
+reasonix*
 .vscode/
 .mvn/
 data/

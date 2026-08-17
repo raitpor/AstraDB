@@ -1,0 +1,23 @@
+[Unit]
+Description=AstraDB server（大数据量时间分片快照高压缩数据库）
+After=network.target
+
+[Service]
+Type=simple
+# 以专用用户运行：useradd -r -m -d /opt/astradb astradb
+User=astradb
+WorkingDirectory=/opt/astradb
+ExecStart=/usr/bin/java -jar /opt/astradb/astradb-server-0.1.0-SNAPSHOT.jar \
+    --astradb.data-dir=/var/lib/astradb
+# 安全配置经环境变量注入（production）
+Environment=ASTRA_DB_SECURITY_ENABLED=true
+Environment=ASTRA_DB_SECURITY_USERNAME=admin
+Environment=ASTRA_DB_SECURITY_PASSWORD=change-me
+Environment=ASTRA_DB_TIMEZONE=Asia/Shanghai
+Restart=on-failure
+RestartSec=5
+# 基础资源限制
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

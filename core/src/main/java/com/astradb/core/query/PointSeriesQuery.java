@@ -1,17 +1,18 @@
 package com.astradb.core.query;
 
+import com.astradb.core.codec.CodecRegistry;
+import com.astradb.core.codec.DeltaVarintCodec;
 import com.astradb.core.compress.Compressor;
 import com.astradb.core.manifest.Manifest;
-import com.astradb.core.meta.Column;
 import com.astradb.core.meta.TableMeta;
 import com.astradb.core.points.PointDictionary;
+import com.astradb.core.segment.ChunkCodec;
 import com.astradb.core.segment.SegmentReader;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -26,7 +27,8 @@ public final class PointSeriesQuery {
     }
 
     public static List<PointRecord> getSeries(TableMeta table, PointDictionary dict, Manifest manifest,
-                                              Compressor compressor, String key, long from, long to, int limit)
+                                              Compressor compressor, ChunkCache cache, String key,
+                                              long from, long to, int limit)
             throws IOException {
         if (limit <= 0) {
             return List.of();
@@ -57,15 +59,19 @@ public final class PointSeriesQuery {
                     if (ts < from) {
                         continue;
                     }
-                    Column ids = reader.decodeColumn(i, 0, compressor);
-                    int row = Arrays.binarySearch(ids.ints(), pointId);
+                    // 按需解码：主键列 delta 顺序查找行号 + 值列解压至目标行即停（不构造整列数组）
+                    byte[] chunk = reader.readChunk(i);
+                    ChunkCodec.RawColumn pkRaw = SnapshotQuery.rawColumn(cache, table.name(),
+                            seg.path(), i, 0, chunk, compressor);
+                    int row = new DeltaVarintCodec().findRow(pkRaw.raw(), pointId);
                     if (row < 0) {
-                        continue; // 该快照不含此点（点集增长前）
+                        continue; // 该快照不含此点（点集增长前/消失后）
                     }
                     List<Object> vals = new ArrayList<>(columnCount - 1);
                     for (int c = 1; c < columnCount; c++) {
-                        Column col = reader.decodeColumn(i, c, compressor);
-                        vals.add(col.valueAt(row));
+                        ChunkCodec.RawColumn rc = SnapshotQuery.rawColumn(cache, table.name(),
+                                seg.path(), i, c, chunk, compressor);
+                        vals.add(CodecRegistry.of(rc.codecId()).valueAt(rc.raw(), row));
                     }
                     out.add(new PointRecord(ts, vals));
                     if (out.size() >= limit) {

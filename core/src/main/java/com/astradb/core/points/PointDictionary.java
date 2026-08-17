@@ -9,13 +9,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.zip.CRC32C;
 
 /**
  * 表级点字典：key → pointId（从 1 开始，分配顺序即落盘顺序）。
+ * 内存结构为开放寻址哈希（平行数组 table/ids，线性探测），替代 HashMap<String,Integer>
+ * 以降低百万级 key 的内存占用；公共 API 与落盘格式保持不变。
  *
  * points.dict 格式（追加式，崩溃安全）：
  *   Header: "APTD"(4B) version(2B)
@@ -26,10 +26,15 @@ public final class PointDictionary {
 
     public static final byte[] MAGIC = {'A', 'P', 'T', 'D'};
     public static final int VERSION = 1;
-    public static final int ENTRY_HEADER_MIN = 4;
+
+    private static final int INITIAL_CAPACITY = 16;
+    private static final double LOAD_FACTOR = 0.7;
 
     private final Path file;
-    private final Map<String, Integer> keyToId = new HashMap<>();
+    /** 开放寻址哈希表：table[i] 为 key（null 表示空槽），ids[i] 为对应 pointId。 */
+    private String[] table;
+    private int[] ids;
+    private int size;
     private final List<String> idToKey = new ArrayList<>();   // 索引 = pointId - 1
     private final List<String> pending = new ArrayList<>();   // 未落盘的新 key（顺序 = id 顺序）
     private int nextId = 1;
@@ -102,9 +107,10 @@ public final class PointDictionary {
                     break; // 半写/损坏条目 → 截断忽略
                 }
                 String key = new String(keyBytes, StandardCharsets.UTF_8);
-                if (d.keyToId.put(key, id) != null) {
+                if (d.idOf(key) >= 0) {
                     throw new IOException("points.dict 存在重复 key: " + key);
                 }
+                d.insert(key, id);
                 d.idToKey.add(key);
                 if (id >= d.nextId) {
                     d.nextId = id + 1;
@@ -128,7 +134,8 @@ public final class PointDictionary {
 
     /** key 的 pointId；不存在返回 -1。 */
     public int idOf(String key) {
-        return keyToId.getOrDefault(key, -1);
+        int idx = find(key);
+        return idx < 0 ? -1 : ids[idx];
     }
 
     /** pointId → key；未知 id 返回 null。 */
@@ -140,17 +147,17 @@ public final class PointDictionary {
     }
 
     public int size() {
-        return keyToId.size();
+        return size;
     }
 
     /** 分配新 pointId（仅内存态，需 flush 落盘）。 */
     public int assign(String key) {
-        Integer exist = keyToId.get(key);
-        if (exist != null) {
-            return exist;
+        int idx = find(key);
+        if (idx >= 0) {
+            return ids[idx];
         }
         int id = nextId++;
-        keyToId.put(key, id);
+        insert(key, id);
         idToKey.add(key);
         pending.add(key);
         return id;
@@ -173,11 +180,10 @@ public final class PointDictionary {
             } else {
                 raf.seek(raf.length());
             }
-            ByteBuf body = new ByteBuf(64);
             for (String key : pending) {
                 byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
-                body = new ByteBuf(16 + keyBytes.length + 8);
-                int id = keyToId.get(key);
+                ByteBuf body = new ByteBuf(16 + keyBytes.length + 8);
+                int id = ids[find(key)];
                 body.writeUInt(keyBytes.length);
                 body.writeBytes(keyBytes);
                 body.writeUInt(id);
@@ -195,5 +201,73 @@ public final class PointDictionary {
             raf.getFD().sync();
         }
         pending.clear();
+    }
+
+    // ---- 开放寻址哈希 ----
+
+    /** 插入（调用方保证 key 不存在）；必要时扩容。 */
+    private void insert(String key, int id) {
+        ensureCapacity(size + 1);
+        int idx = findSlot(key);
+        table[idx] = key;
+        ids[idx] = id;
+        size++;
+    }
+
+    /** 查找 key 所在槽位；不存在返回 -1。 */
+    private int find(String key) {
+        if (table == null) {
+            return -1;
+        }
+        int mask = table.length - 1;
+        int h = key.hashCode() & mask;
+        for (int i = 0; i < table.length; i++) {
+            int idx = (h + i) & mask;
+            String k = table[idx];
+            if (k == null) {
+                return -1;
+            }
+            if (k.equals(key)) {
+                return idx;
+            }
+        }
+        return -1;
+    }
+
+    /** 查找空槽（线性探测）。 */
+    private int findSlot(String key) {
+        int mask = table.length - 1;
+        int h = key.hashCode() & mask;
+        for (int i = 0; i < table.length; i++) {
+            int idx = (h + i) & mask;
+            if (table[idx] == null) {
+                return idx;
+            }
+        }
+        throw new IllegalStateException("hash table full");
+    }
+
+    private void ensureCapacity(int required) {
+        if (table == null) {
+            table = new String[INITIAL_CAPACITY];
+            ids = new int[INITIAL_CAPACITY];
+            return;
+        }
+        if (required > table.length * LOAD_FACTOR) {
+            String[] oldTable = table;
+            int[] oldIds = ids;
+            int cap = table.length * 2;
+            table = new String[cap];
+            ids = new int[cap];
+            size = 0;
+            for (int i = 0; i < oldTable.length; i++) {
+                if (oldTable[i] != null) {
+                    int idx = findSlot(oldTable[i]);
+                    table[idx] = oldTable[i];
+                    ids[idx] = oldIds[i];
+                    size++;
+                }
+            }
+        }
     }
 }

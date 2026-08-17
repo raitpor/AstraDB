@@ -2,6 +2,7 @@ package com.astradb.core.segment;
 
 import com.astradb.core.codec.CodecRegistry;
 import com.astradb.core.codec.ColumnCodec;
+import com.astradb.core.codec.DeltaVarintCodec;
 import com.astradb.core.compress.Compressor;
 import com.astradb.core.meta.Column;
 import com.astradb.core.util.ByteBuf;
@@ -97,13 +98,45 @@ public final class ChunkCodec {
         }
         List<Column> columns = new ArrayList<>(n);
         for (int i = 0; i < n; i++) {
-            columns.add(decodeColumnBlock(data, offsets[i], lengths[i], codecIds[i], compressor));
+            byte[] raw = decodeColumnBlockRaw(data, offsets[i], lengths[i], compressor);
+            columns.add(CodecRegistry.of(codecIds[i]).decode(raw));
         }
         return new Chunk(timestamp, schemaVersion, columns);
     }
 
     /** 只解码指定列（单点查询按需取列）。 */
     public static Column decodeColumn(byte[] data, int columnIndex, Compressor compressor) {
+        RawColumn rc = decodeRawColumn(data, columnIndex, compressor);
+        return CodecRegistry.of(rc.codecId()).decode(rc.raw());
+    }
+
+    /** 区间解码指定列 [from, to) 行（分页查询按需解码，不构造整列数组）。 */
+    public static Column decodeColumnRange(byte[] data, int columnIndex, int from, int to,
+                                           Compressor compressor) {
+        RawColumn rc = decodeRawColumn(data, columnIndex, compressor);
+        return CodecRegistry.of(rc.codecId()).decodeRange(rc.raw(), from, to);
+    }
+
+    /** 公开：按列索引取 zstd 解压后的原始字节（供 ChunkCache 复用）。 */
+    public static RawColumn rawColumnAt(byte[] data, int columnIndex, Compressor compressor) {
+        return decodeRawColumn(data, columnIndex, compressor);
+    }
+
+    /** 取指定列第 row 行值（zstd 解压该列块后按需解码，不构造整列数组）。 */
+    public static Object valueColumnAt(byte[] data, int columnIndex, int row, Compressor compressor) {
+        RawColumn rc = decodeRawColumn(data, columnIndex, compressor);
+        return CodecRegistry.of(rc.codecId()).valueAt(rc.raw(), row);
+    }
+
+    /** 主键列（第 0 列，DeltaVarint 有序）查找目标 pointId 行号；不存在返回 -1。 */
+    public static int findPrimaryKeyRow(byte[] data, int pointId, Compressor compressor) {
+        RawColumn rc = decodeRawColumn(data, 0, compressor);
+        return new DeltaVarintCodec().findRow(rc.raw(), pointId);
+    }
+
+    public record RawColumn(byte[] raw, byte codecId) {
+    }
+    private static RawColumn decodeRawColumn(byte[] data, int columnIndex, Compressor compressor) {
         ByteReader in = new ByteReader(data);
         in.readLong();      // timestamp
         in.readInt();       // rowCount
@@ -120,18 +153,16 @@ public final class ChunkCodec {
             lengths[i] = in.readInt();
             codecIds[i] = (byte) in.readByte();
         }
-        return decodeColumnBlock(data, offsets[columnIndex], lengths[columnIndex],
-                codecIds[columnIndex], compressor);
+        return new RawColumn(decodeColumnBlockRaw(data, offsets[columnIndex], lengths[columnIndex], compressor),
+                codecIds[columnIndex]);
     }
 
-    private static Column decodeColumnBlock(byte[] data, int offset, int length, byte codecId,
-                                            Compressor compressor) {
+    private static byte[] decodeColumnBlockRaw(byte[] data, int offset, int length, Compressor compressor) {
         ByteReader in = new ByteReader(data, offset);
         int uncompressedSize = (int) in.readUInt();
         byte[] compressed = new byte[length - (in.position() - offset)];
         System.arraycopy(data, in.position(), compressed, 0, compressed.length);
-        byte[] raw = compressor.decompress(compressed, uncompressedSize);
-        return CodecRegistry.of(codecId).decode(raw);
+        return compressor.decompress(compressed, uncompressedSize);
     }
 
     /** 读取 chunk 时间戳（不解压）。 */
@@ -146,6 +177,11 @@ public final class ChunkCodec {
     public static int rowCountOf(byte[] data) {
         return ((data[8] & 0xFF) << 24) | ((data[9] & 0xFF) << 16)
                 | ((data[10] & 0xFF) << 8) | (data[11] & 0xFF);
+    }
+
+    /** 读取 chunk 列数。 */
+    public static int columnCountOf(byte[] data) {
+        return ((data[14] & 0xFF) << 8) | (data[15] & 0xFF);
     }
 
     /** 由列偏移表计算 chunk 总长（含 CRC），崩溃恢复定位用。仅需头 + 列偏移表。 */

@@ -11,6 +11,7 @@ import com.astradb.core.meta.SchemaRegistry;
 import com.astradb.core.meta.TableMeta;
 import com.astradb.core.meta.TablesStore;
 import com.astradb.core.points.PointDictionary;
+import com.astradb.core.query.ChunkCache;
 import com.astradb.core.query.PointSeriesQuery;
 import com.astradb.core.query.SnapshotQuery;
 import com.astradb.core.retention.RetentionCleaner;
@@ -37,8 +38,11 @@ import java.util.stream.Stream;
  */
 public final class AstraDB implements AutoCloseable {
 
+    public static final String VERSION = "0.1.0";
     public static final int DEFAULT_COMPRESSION_LEVEL = 3;
     public static final int DEFAULT_RETENTION_DAYS = 1825; // 5 年
+    /** 查询列解压缓存默认上限（64MB，0 禁用）。 */
+    public static final long DEFAULT_QUERY_CACHE_BYTES = 64L * 1024 * 1024;
     public static final int MAX_NAME_LENGTH = 128;
 
     /** 表概览（server/UI 用）。 */
@@ -78,12 +82,16 @@ public final class AstraDB implements AutoCloseable {
     private final Map<String, TableState> states = new TreeMap<>();
     /** 全局锁：仅保护表集合（建/删表）与表查找；数据操作走表级锁。 */
     private final ReentrantReadWriteLock globalLock = new ReentrantReadWriteLock();
+    /** 查询列解压 LRU 缓存（跨查询复用，缓解反复解压；0 = 禁用）。 */
+    private final ChunkCache cache;
 
-    private AstraDB(Path dataDir, int defaultCompressionLevel, java.time.ZoneId zone, TablesStore store) {
+    private AstraDB(Path dataDir, int defaultCompressionLevel, java.time.ZoneId zone, TablesStore store,
+                    long cacheBytes) {
         this.dataDir = dataDir;
         this.defaultCompressionLevel = defaultCompressionLevel;
         this.zone = zone;
         this.store = store;
+        this.cache = new ChunkCache(cacheBytes);
     }
 
     /** 打开（或初始化）数据库目录，按天分片使用系统默认时区。 */
@@ -97,9 +105,15 @@ public final class AstraDB implements AutoCloseable {
 
     /** 打开；指定按天分片时区（与页面/数据时间戳保持一致）。 */
     public static AstraDB open(Path dataDir, int defaultCompressionLevel, java.time.ZoneId zone) throws IOException {
+        return open(dataDir, defaultCompressionLevel, zone, DEFAULT_QUERY_CACHE_BYTES);
+    }
+
+    /** 打开；指定时区与查询缓存上限（字节；0 禁用）。 */
+    public static AstraDB open(Path dataDir, int defaultCompressionLevel, java.time.ZoneId zone, long cacheBytes)
+            throws IOException {
         Files.createDirectories(dataDir);
         TablesStore store = TablesStore.load(dataDir);
-        AstraDB db = new AstraDB(dataDir, defaultCompressionLevel, zone, store);
+        AstraDB db = new AstraDB(dataDir, defaultCompressionLevel, zone, store, cacheBytes);
         for (TableMeta meta : store.all()) {
             db.loadTable(meta);
         }
@@ -108,6 +122,16 @@ public final class AstraDB implements AutoCloseable {
 
     public java.time.ZoneId zone() {
         return zone;
+    }
+
+    /** 查询缓存条目数（测试/监控用）。 */
+    public int queryCacheSize() {
+        return cache.size();
+    }
+
+    /** 查询缓存当前字节数（测试/监控用）。 */
+    public long queryCacheBytes() {
+        return cache.currentBytes();
     }
 
     private void loadTable(TableMeta meta) throws IOException {
@@ -135,7 +159,7 @@ public final class AstraDB implements AutoCloseable {
         return true;
     }
 
-    /** 启动校验：manifest 与磁盘段一致，不一致则校正（重建时精确计算 minKey/maxKey 段窗口）。 */
+    /** 启动校验：manifest 与磁盘段一致，不一致则校正。正常启动走轻量描述（不解码），仅漂移/缺失段精确重建窗口。 */
     private static void validateManifest(TableMeta meta, PointDictionary dict, Manifest manifest,
                                          Compressor compressor)
             throws IOException {
@@ -148,18 +172,20 @@ public final class AstraDB implements AutoCloseable {
                         .filter(p -> p.getFileName().toString().endsWith(".seg")).toList()) {
                     String rel = SegmentPaths.relative(p, meta.dir());
                     disk.add(rel);
-                    diskInfos.add(describeSegment(meta, p, rel, compressor));
+                    Manifest.SegmentInfo light = describeSegmentLight(meta, p, rel);
+                    Manifest.SegmentInfo old = findSegment(manifest, rel);
+                    if (old == null || !sameSegmentInfo(old, light)) {
+                        // 缺失或信息漂移 → 精确重建（解码主键列计算 minKey/maxKey）
+                        diskInfos.add(describeSegmentPrecise(meta, p, rel, compressor));
+                    }
                 }
             }
         }
         boolean dirty = false;
-        // 磁盘有、manifest 无或信息不一致 → 合并
+        // 磁盘有、manifest 无或信息不一致 → 合并（精确信息）
         for (Manifest.SegmentInfo info : diskInfos) {
-            Manifest.SegmentInfo old = findSegment(manifest, info.path());
-            if (old == null || !sameSegmentInfo(old, info)) {
-                manifest.addOrMerge(info);
-                dirty = true;
-            }
+            manifest.addOrMerge(info);
+            dirty = true;
         }
         // manifest 有、磁盘无 → 移除
         for (Manifest.SegmentInfo s : manifest.segments()) {
@@ -178,6 +204,21 @@ public final class AstraDB implements AutoCloseable {
                 && a.sizeBytes() == b.sizeBytes() && a.endTime() == b.endTime();
     }
 
+    /** 轻量描述：仅读段头与 ChunkIndex（不解码数据列），min/max 占位。 */
+    private static Manifest.SegmentInfo describeSegmentLight(TableMeta meta, Path p, String rel)
+            throws IOException {
+        try (SegmentReader reader = SegmentReader.open(p)) {
+            long rows = 0;
+            long endTime = reader.segmentStartTime();
+            for (int i = 0; i < reader.chunkCount(); i++) {
+                rows += reader.entry(i).rowCount();
+                endTime = reader.timestampAt(i);
+            }
+            return new Manifest.SegmentInfo(rel, reader.segmentStartTime(), endTime,
+                    reader.chunkCount(), rows, 1, 1, Files.size(p));
+        }
+    }
+
     private static Manifest.SegmentInfo findSegment(Manifest manifest, String path) {
         for (Manifest.SegmentInfo s : manifest.segments()) {
             if (s.path().equals(path)) {
@@ -188,7 +229,7 @@ public final class AstraDB implements AutoCloseable {
     }
 
     /** 由磁盘段读取段信息；minKey/maxKey 精确计算（解码主键列首尾，K-01）。 */
-    private static Manifest.SegmentInfo describeSegment(TableMeta meta, Path p, String rel, Compressor compressor)
+    private static Manifest.SegmentInfo describeSegmentPrecise(TableMeta meta, Path p, String rel, Compressor compressor)
             throws IOException {
         try (SegmentReader reader = SegmentReader.open(p)) {
             long rows = 0;
@@ -329,24 +370,49 @@ public final class AstraDB implements AutoCloseable {
         }
     }
 
+    /** 批量导入：多个快照一次落盘（点字典/段 fsync 次数大幅减少，时间戳须严格递增）。 */
+    public List<SnapshotIngestor.IngestResult> ingestBatch(String name,
+                                                           List<SnapshotIngestor.BatchSnapshot> snapshots)
+            throws IOException {
+        TableState st = stateOf(name);
+        st.lock.writeLock().lock();
+        try {
+            return SnapshotIngestor.ingestBatch(st.meta, st.dict, st.manifest, st.compressor, snapshots, zone);
+        } finally {
+            st.lock.writeLock().unlock();
+        }
+    }
+
     // ---- 查询 ----
 
     public SnapshotQuery.SnapshotPage snapshot(String name, long ts, int offset, int limit) throws IOException {
         TableState st = stateOf(name);
         st.lock.readLock().lock();
         try {
-            return SnapshotQuery.getSnapshot(st.meta, st.dict, st.manifest, st.compressor, ts, offset, limit);
+            return SnapshotQuery.getSnapshot(st.meta, st.dict, st.manifest, st.compressor, cache, ts, offset, limit);
         } finally {
             st.lock.readLock().unlock();
         }
     }
 
+    /** 全量快照（不分页）：精确时间点匹配，一次返回该快照全部行。 */
+    public SnapshotQuery.FullSnapshot fullSnapshot(String name, long ts) throws IOException {
+        TableState st = stateOf(name);
+        st.lock.readLock().lock();
+        try {
+            return SnapshotQuery.getFullSnapshot(st.meta, st.dict, st.manifest, st.compressor, cache, ts);
+        } finally {
+            st.lock.readLock().unlock();
+        }
+    }
+
+    /** 单点历史序列。 */
     public List<PointSeriesQuery.PointRecord> series(String name, String key, long from, long to, int limit)
             throws IOException {
         TableState st = stateOf(name);
         st.lock.readLock().lock();
         try {
-            return PointSeriesQuery.getSeries(st.meta, st.dict, st.manifest, st.compressor, key, from, to, limit);
+            return PointSeriesQuery.getSeries(st.meta, st.dict, st.manifest, st.compressor, cache, key, from, to, limit);
         } finally {
             st.lock.readLock().unlock();
         }

@@ -84,4 +84,66 @@ public final class DictionaryCodec implements ColumnCodec {
         }
         return Column.ofStrings(out);
     }
+
+    @Override
+    public Object valueAt(byte[] data, int rowIndex) {
+        ByteReader in = new ByteReader(data);
+        ColumnType type = ColumnType.values()[in.readByte()];
+        if (type != ColumnType.STRING) {
+            throw new IllegalStateException("Dictionary 块列类型非法: " + type);
+        }
+        int n = (int) in.readUInt();
+        if (rowIndex < 0 || rowIndex >= n) {
+            throw new IllegalArgumentException("行号越界: " + rowIndex + " (rows=" + n + ")");
+        }
+        int dictSize = (int) in.readUInt();
+        String[] dict = new String[dictSize];
+        for (int i = 0; i < dictSize; i++) {
+            int len = (int) in.readUInt();
+            byte[] utf8 = new byte[len];
+            for (int j = 0; j < len; j++) {
+                utf8[j] = (byte) in.readByte();
+            }
+            dict[i] = new String(utf8, StandardCharsets.UTF_8);
+        }
+        long id = 0;
+        for (int i = 0; i <= rowIndex; i++) {
+            id = in.readUInt();
+        }
+        return dict[(int) id];
+    }
+
+    @Override
+    public Column decodeRange(byte[] data, int from, int to) {
+        ByteReader in = new ByteReader(data);
+        ColumnType type = ColumnType.values()[in.readByte()];
+        if (type != ColumnType.STRING) {
+            throw new IllegalStateException("Dictionary 块列类型非法: " + type);
+        }
+        int n = (int) in.readUInt();
+        if (from < 0 || to < from || to > n) {
+            throw new IllegalArgumentException("区间越界: [" + from + ", " + to + ") rows=" + n);
+        }
+        int dictSize = (int) in.readUInt();
+        String[] dict = new String[dictSize];
+        for (int i = 0; i < dictSize; i++) {
+            int len = (int) in.readUInt();
+            byte[] utf8 = new byte[len];
+            for (int j = 0; j < len; j++) {
+                utf8[j] = (byte) in.readByte();
+            }
+            dict[i] = new String(utf8, StandardCharsets.UTF_8);
+        }
+        long id = 0;
+        for (int i = 0; i < from; i++) {
+            id = in.readUInt(); // 跳过 from 行
+        }
+        int len = to - from;
+        String[] out = new String[len];
+        for (int i = 0; i < len; i++) {
+            id = in.readUInt();
+            out[i] = dict[(int) id];
+        }
+        return Column.ofStrings(out);
+    }
 }

@@ -35,6 +35,7 @@
 11. **时区分片**：按天分片时区可配置（`astradb.timezone`，缺省系统时区），保证数据文件日期与页面/数据时间戳一致；
 12. **导入入口解耦**：`SnapshotData`（列缓冲 record）为通用导入载体，CSV 与其他导入方式解析为同一 record 后复用同一落盘逻辑；
 13. **段管理**：数据文件可查看段内快照时间戳（`listSegmentSnapshots`）与删除（`deleteSegment`，confirm + 路径穿越校验，不可恢复）；同段时间戳单调递增（乱序/重复拒绝，跨天回填允许）。
+14. **查询优化**：分页查询按行区间解码（`decodeRange`，只解码目标区间）+ LRU 列解压缓存（`ChunkCache`，上限 `astradb.query.cache-mb` 可配，默认 64MB，0 禁用），缓解同快照反复解压；点字典用开放寻址哈希紧凑化（落盘格式兼容）。
 
 ## 3. 总体架构
 
@@ -226,7 +227,7 @@ interface ColumnCodec {
 
 | 查询 | 路径 |
 |---|---|
-| 全量快照 @ts | manifest 定位日期 `.seg` → ChunkIndex 按时间戳二分 → 解压 chunk → 流式分页返回 |
+| 全量快照 @ts | manifest 定位日期 `.seg` → ChunkIndex 按时间戳二分 → **精确匹配 timestamp == ts** → 解压 chunk → 流式分页返回；该时间点无快照 → 返回空结果集（调用方提示"该时间无数据"） |
 | 单点历史 | 遍历 manifest，用段窗口（主键 min/max）跳过不含该点的段 → 解压候选 chunk 主键列二分得行号 → **只解压所需值列**的对应行 |
 
 - 分页：快照查询按行区间分页（offset/limit），响应为行数组 + 总行数；
@@ -274,10 +275,14 @@ interface ColumnCodec {
 | POST | `/api/importSnapshot` | 导入快照：multipart CSV + table + 可选 timestamp |
 | POST | `/api/listSnapshots` | 快照时间点列表，请求体：table |
 | POST | `/api/getSnapshot` | 全量快照（分页），请求体：table + ts + offset/limit |
+| POST | `/api/getFullSnapshot` | 全量快照（不分页，一次返回该时间点全部行），请求体：table + ts |
 | POST | `/api/getPointSeries` | 单点历史序列，请求体：table + key + from/to/limit |
 | POST | `/api/getTableStats` | 存储/压缩率统计，请求体：table |
 | POST | `/api/listSegmentSnapshots` | 段内快照时间戳与行数（数据文件详情），请求体：table + path |
 | POST | `/api/deleteSegment` | 删除数据文件（不可恢复），请求体：table + path + confirm=true |
+| POST | `/api/listSegments` | 段文件列表，请求体：table |
+| POST | `/api/importSnapshots` | 批量导入：多 CSV + 严格递增 timestamps（multipart），一次落盘减少 fsync |
+| GET | `/api/health` | 健康检查：status/version/tables/dataDir/dataDirWritable/uptimeMs（鉴权开启时放行） |
 
 说明：所有操作均使用 POST；参数（除 `importSnapshot` 的 CSV 文件外）统一放入 JSON 请求体。
 
@@ -293,6 +298,12 @@ astradb:
   data-dir: ./data
   compression-level: 3        # 默认 zstd 压缩等级（1~22），建表时可表级覆盖
   timezone: Asia/Shanghai     # 按天分片时区（保证数据文件与页面时间戳一致）；缺省取系统时区
+  query:
+    cache-mb: 64              # 查询列解压 LRU 缓存上限（MB；0 禁用；同快照多次分页/查询复用解压结果）
+  security:
+    enabled: false            # API/页面鉴权（生产开启；默认关闭便于本地开发）
+    username: admin
+    password: admin123        # 生产经环境变量 ASTRA_DB_SECURITY_PASSWORD 覆盖
 server:
   port: 8080
 ```
@@ -302,7 +313,7 @@ server:
 | 页面 | 功能 |
 |---|---|
 | 首页 / 表列表 | 表概览（统计式卡片）、建表（动态列编辑）、删除表（confirm） |
-| 表详情 | 概览统计、快照导入（CSV + 日期时间/毫秒时间戳联动）、按时间戳浏览数据（分页）、在该时间戳搜索点、数据文件浏览（查看段内快照时间戳弹窗 / 删除段文件） |
+| 表详情 | 概览统计、快照导入（CSV + 日期时间/毫秒时间戳双向联动）、按时间戳浏览数据（分页）、在该时间戳搜索点、数据文件浏览（段详情弹窗显示段内快照时间戳/删除段文件） |
 
 页面数据全部经 REST API 获取（原生 JS fetch），无前端构建。
 
@@ -337,6 +348,40 @@ AstraDB/
 | M2 server | REST API、启动初始化、保留期定时任务、表管理 | 集成测试：导入→查询→清理全链路 |
 | M3 管理页面 | Thymeleaf 页面 + 原生 JS | 手工验证建表/导入/查询/统计 |
 | M4 打磨 | 性能基准（写入 5s / 读取 2s / 内存 100MB）、zstd 等级调优、异常边界 | 对照 13 节指标 |
+| M5 性能与安全优化 | 原始类型排序、查询按需解码、批量导入（fsync 减少）、启动校验提速、百万行压测；API 鉴权开关、健康检查、部署产物（Docker/compose/systemd） | 全量回归通过；批量导入 3×10 万行 90ms vs 逐条 224ms；百万行写入 1485ms / 读取 2558ms；鉴权开启/关闭测试通过 |
+
+---
+
+## 16. 优化实施记录（M5，已实施）
+
+### 16.1 性能优化
+
+| 项 | 实现 | 验证 |
+|---|---|---|
+| 原始类型排序 | `SnapshotIngestor.sortIndex` 改为 int[] 快排（三数取中 + 尾递归），消除 Integer[] 装箱 | 全量回归通过 |
+| 查询按需解码 | `ColumnCodec.valueAt`（DeltaVarint/Gorilla/Dictionary）+ `DeltaVarintCodec.findRow` + `ChunkCodec.valueColumnAt/findPrimaryKeyRow`；单点历史主键顺序查找 + 值列解压至行即停（不构造整列数组） | 288 快照×10 万点单点历史实测 1.8s；既有单点历史测试通过 |
+| 批量导入 | `SnapshotIngestor.ingestBatch`（dict 落盘一次、同段共享 writer、manifest 末尾保存一次）+ `POST /api/importSnapshots`（多 CSV + 严格递增 timestamps） | 3×10 万行批量 90ms vs 逐条 224ms（fsync 3 vs 9） |
+| 启动校验提速 | `validateManifest` 两级：正常启动 `describeSegmentLight`（不解码），仅缺失/漂移段 `describeSegmentPrecise`（精确窗口） | 全量回归通过 |
+| 百万行压测 | `PerfBenchmarkTest.millionRowsBenchmark`（结项 K-04） | 100 万点写入 1485ms、读取 2558ms、压缩率 10170x（重复模式）、内存约 569MB（含测试堆） |
+
+### 16.2 安全与部署
+
+| 项 | 实现 | 验证 |
+|---|---|---|
+| API 鉴权 | `spring-boot-starter-security` + `SecurityConfig`；`astradb.security.enabled`（默认 false）；开启后 `/api/**` 与页面需认证（Basic + 表单），`/api/health` 与静态资源放行；csrf disable（无状态 Basic 认证） | SecurityEnabledTest（未认证 401/错误密码 401/正确认证 200） |
+| 健康检查 | `GET /api/health`：status/version/tables/dataDir/dataDirWritable/uptimeMs | 集成测试 + 真实 curl 验证 |
+| 部署产物 | `Dockerfile`（多阶段）、`docker-compose.yml`（数据卷 + 环境变量注入安全/时区配置）、`deploy/astradb.service`（systemd 示例） | 文件提供；Docker 未实测（环境无 docker） |
+
+### 16.3 查询与内存优化（opt2 轮）
+
+| 项 | 实现 |
+|---|---|
+| 区间解码 | `ColumnCodec.decodeRange`（DeltaVarint/Gorilla/Dictionary）：分页查询只解码 `[offset, offset+limit)` 行区间，不构造整列数组（配合 ChunkCodec.decodeColumnRange） |
+| LRU 列解压缓存 | `ChunkCache`：缓存 zstd 解压后的列原始字节（键 = 表+段+chunk+列），同快照多次分页/查询复用；按字节上限淘汰最久未用，上限可配 `astradb.query.cache-mb`（默认 64MB，0 禁用）；接入 `getSnapshot`/`getFullSnapshot`/`PointSeriesQuery` |
+| 点字典紧凑化 | `PointDictionary` 内存结构改为开放寻址哈希（平行数组 + 线性探测）替代 `HashMap<String,Integer>`，降低百万级 key 内存占用；落盘格式与公共 API 兼容 |
+| CSV 排序内存优化 | 导入按 pointId 排序时跳过主键列重复 permute（主键列直接以排序后的 pointId 数组构建），省一次全列复制 |
+
+> 说明：以上均为已实施项；如后续追加新优化，继续在本节登记并标注状态。
 
 ---
 

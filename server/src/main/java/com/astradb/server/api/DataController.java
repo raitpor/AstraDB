@@ -13,6 +13,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -32,6 +33,9 @@ public class DataController {
     }
 
     public record SnapshotRequest(String table, long ts, int offset, int limit) {
+    }
+
+    public record FullSnapshotRequest(String table, long ts) {
     }
 
     public record SeriesRequest(String table, String key, long from, long to, int limit) {
@@ -63,6 +67,12 @@ public class DataController {
         return service.db().snapshot(req.table(), req.ts(), req.offset(), req.limit());
     }
 
+    /** 全量快照（不分页）。 */
+    @PostMapping("/getFullSnapshot")
+    public SnapshotQuery.FullSnapshot getFullSnapshot(@RequestBody FullSnapshotRequest req) throws IOException {
+        return service.db().fullSnapshot(req.table(), req.ts());
+    }
+
     @PostMapping("/getPointSeries")
     public List<PointSeriesQuery.PointRecord> getPointSeries(@RequestBody SeriesRequest req) throws IOException {
         return service.db().series(req.table(), req.key(), req.from(), req.to(), req.limit());
@@ -83,5 +93,27 @@ public class DataController {
         }
         service.db().deleteSegment(req.table(), req.path());
         return java.util.Map.of("deleted", true, "table", req.table(), "path", req.path());
+    }
+
+    /** 批量导入：多个 CSV + 对应时间戳（严格递增），一次落盘减少 fsync。 */
+    @PostMapping("/importSnapshots")
+    public List<SnapshotIngestor.IngestResult> importSnapshots(
+            @RequestParam("table") String table,
+            @RequestParam("file") List<org.springframework.web.multipart.MultipartFile> files,
+            @RequestParam(value = "timestamps", required = false) List<Long> timestamps) throws IOException {
+        if (timestamps == null || timestamps.size() != files.size()) {
+            throw new IllegalArgumentException(
+                    "批量导入需为每个文件提供对应时间戳（timestamps 列表，与 file 一一对应且严格递增）");
+        }
+        com.astradb.core.meta.Schema schema = service.db().tableInfo(table).schema();
+        List<SnapshotIngestor.BatchSnapshot> snapshots = new ArrayList<>(files.size());
+        for (int i = 0; i < files.size(); i++) {
+            com.astradb.core.ingest.SnapshotData data;
+            try (InputStream in = files.get(i).getInputStream()) {
+                data = com.astradb.core.ingest.CsvParser.parse(in, schema, true);
+            }
+            snapshots.add(new SnapshotIngestor.BatchSnapshot(data, timestamps.get(i)));
+        }
+        return service.db().ingestBatch(table, snapshots);
     }
 }

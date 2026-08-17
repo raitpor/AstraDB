@@ -1,0 +1,15 @@
+services:
+  astradb:
+    build: .
+    image: astradb:0.1.0
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data            # 数据持久化
+    environment:
+      # Spring Boot relaxed binding：astradb.security.enabled ← ASTRA_DB_SECURITY_ENABLED
+      - ASTRA_DB_SECURITY_ENABLED=true
+      - ASTRA_DB_SECURITY_USERNAME=admin
+      - ASTRA_DB_SECURITY_PASSWORD=change-me   # 生产务必修改
+      - ASTRA_DB_TIMEZONE=Asia/Shanghai
+    restart: unless-stopped

@@ -4,6 +4,14 @@ astradb:
   # 按天分片时区（与页面/数据时间戳保持一致）；缺省取系统时区
   # 示例：Asia/Shanghai、UTC、+08:00
   timezone: Asia/Shanghai
+  # 查询列解压 LRU 缓存上限（MB；0 禁用；同一快照多次分页/查询复用解压结果）
+  query:
+    cache-mb: 64
+  # API 与页面鉴权（生产开启；默认关闭便于本地开发）
+  security:
+    enabled: false
+    username: admin
+    password: admin123    # 生产务必通过环境变量 ASTRA_DB_SECURITY_PASSWORD 覆盖
 
 server:
   port: 8080

@@ -16,7 +16,38 @@
 - **保留期**：表级配置天数，定时整文件清理超期段
 - **时区分片**：按天分片时区可配置（`astradb.timezone`），数据文件与页面时间戳一致
 - **数据文件管理**：段文件可查看段内快照时间戳、可单独删除（confirm 防误删、防路径穿越）
+- **性能优化**：查询按需解码（单点历史不构造整列数组）、批量导入（fsync 减少 ~60%）、百万行写入 1.5s
 - **schema 冻结**：建表即定列，杜绝历史数据漂移
+
+## 部署与安全
+
+### 启用鉴权（生产）
+
+```yaml
+# application.yml 或环境变量
+astradb:
+  security:
+    enabled: true
+    username: admin
+    password: change-me      # 生产用 ASTRA_DB_SECURITY_PASSWORD 注入
+```
+
+开启后 `/api/**` 与管理页面需登录（Basic 或表单）；`/api/health` 与静态资源放行。
+
+### Docker
+
+```bash
+docker build -t astradb:0.1.0 .
+docker compose up -d          # 数据卷 ./data、安全/时区经环境变量注入
+```
+
+### systemd
+
+见 `deploy/astradb.service`（专用用户 + 环境变量注入 + 资源限制）。
+
+### 健康检查
+
+`GET /api/health` → `{"status":"UP","version":"0.1.0","tables":N,"dataDir":"./data","dataDirWritable":true,"uptimeMs":...}`
 
 ## 架构
 
@@ -84,10 +115,13 @@ curl -X POST $BASE/api/getPointSeries -H 'Content-Type: application/json' \
 | `/api/importSnapshot` | 导入快照（multipart CSV + 可选 timestamp） |
 | `/api/listSnapshots` | 快照时间点列表 |
 | `/api/getSnapshot` | 全量快照（分页） |
+| `/api/getFullSnapshot` | 全量快照（不分页，一次返回该时间点全部行） |
 | `/api/getPointSeries` | 单点历史序列（from/to/limit） |
 | `/api/getTableStats` | 存储/压缩率统计 |
 | `/api/listSegmentSnapshots` | 段内快照时间戳与行数（数据文件详情） |
 | `/api/deleteSegment` | 删除数据文件（需 `confirm: true`，不可恢复） |
+| `/api/importSnapshots` | 批量导入：多 CSV + 严格递增 timestamps（减少 fsync） |
+| `GET /api/health` | 健康检查（鉴权开启时放行） |
 
 ## 存储格式要点
 
@@ -106,7 +140,7 @@ curl -X POST $BASE/api/getPointSeries -H 'Content-Type: application/json' \
 ## 测试
 
 ```bash
-mvn test    # 42 项自动化测试（core 40 + server 2），含性能基准
+mvn test    # 63 项自动化测试（core 58 + server 5），含性能基准与鉴权用例
 ```
 
 测试计划、用例、缺陷跟踪与报告见 [docs/test/](docs/test/)。

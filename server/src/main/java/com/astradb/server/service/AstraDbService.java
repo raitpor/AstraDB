@@ -20,14 +20,21 @@ public class AstraDbService {
 
     private final AstraDB db;
     private final Path dataDir;
+    private final long startedAtMillis = System.currentTimeMillis();
 
     public AstraDbService(@Value("${astradb.data-dir:./data}") String dataDir,
                           @Value("${astradb.compression-level:3}") int compressionLevel,
-                          @Value("${astradb.timezone:}") String timezone) throws IOException {
+                          @Value("${astradb.timezone:}") String timezone,
+                          @Value("${astradb.query.cache-mb:64}") long cacheMb) throws IOException {
         this.dataDir = Path.of(dataDir);
         java.time.ZoneId zone = parseZone(timezone);
-        this.db = AstraDB.open(this.dataDir, compressionLevel, zone);
-        log.info("AstraDB 已加载：dataDir={}, timezone={}, 表={}", this.dataDir, zone, db.listTables());
+        this.db = AstraDB.open(this.dataDir, compressionLevel, zone, cacheMb * 1024 * 1024);
+        log.info("AstraDB 已加载：dataDir={}, timezone={}, queryCacheMB={}, 表={}",
+                this.dataDir, zone, cacheMb, db.listTables());
+    }
+
+    public long startedAtMillis() {
+        return startedAtMillis;
     }
 
     /** 解析时区配置；为空则用系统默认时区（保证与页面/数据时间戳一致）。 */
