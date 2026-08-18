@@ -299,6 +299,9 @@ public final class AstraDB implements AutoCloseable {
             if (pkIndex < 0) {
                 throw new IllegalArgumentException("主键列不存在: " + primaryKey);
             }
+            if (pkIndex != 0) {
+                throw new IllegalArgumentException("主键列必须为第一列（当前第 " + (pkIndex + 1) + " 列）");
+            }
             int level = compressionLevel != null ? compressionLevel : defaultCompressionLevel;
             if (level < 1 || level > 22) {
                 throw new IllegalArgumentException("压缩等级须在 [1,22]");

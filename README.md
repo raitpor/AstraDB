@@ -81,6 +81,47 @@ java -jar server/target/astradb-server-0.1.0-SNAPSHOT.jar \
 
 打开管理台：<http://localhost:8080>
 
+### Java Client SDK（二进制数据流）
+
+独立 Maven 模块 `astradb-client`（JDK HttpClient + Jackson，无 Spring 依赖），以专有列式二进制协议与 server 交换数据（流式/高密度/精确类型）。
+
+```xml
+<dependency>
+  <groupId>com.astradb</groupId>
+  <artifactId>astradb-client</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+```java
+import com.astradb.client.AstraDbClient;
+import com.astradb.client.QueryResult;
+
+// 无认证 / Basic 认证（与 server 鉴权账号对应）
+AstraDbClient client = new AstraDbClient("http://localhost:8080");
+// AstraDbClient client = new AstraDbClient("http://localhost:8080", "admin", "password");
+
+// 导入：行×列数据（Integer/Long/Double/Float/String，可含 null），返回 rowCount
+int rows = client.ingest("t1", System.currentTimeMillis(), List.of(
+        List.of(1, 1.5, "华东"),
+        List.of(2, null, null)));
+
+// 全量快照：列名 + 数据行（行对齐列名，含主键列；null 值以 null 表示）
+QueryResult r = client.queryFullSnapshot("t1", ts);
+for (Object[] row : r.rows()) { /* ... */ }
+
+// 指定时间点单点数据：值列数组（不含主键）；该时间点无数据返回 null
+Object[] point = client.queryPointAt("t1", "42", ts);
+
+// 元数据（JSON）
+client.createTable("t1", List.of(
+        Map.of("name", "id", "type", "INT"),
+        Map.of("name", "v", "type", "DOUBLE", "nullable", true)), "id");
+client.listTables();
+```
+
+二进制端点：`POST /api/importBinary`、`POST /api/queryFullSnapshotBinary`（协议见 [docs/client-design.md](docs/client-design.md)）。
+
 ### 使用示例（curl）
 
 ```bash

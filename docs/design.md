@@ -43,6 +43,7 @@
 AstraDB (Maven 多模块)
 ├── core    存储引擎：纯 Java，零 Spring 依赖（可独立单测与复用）
 │           元数据 / 列编码 / 压缩 / segment 读写 / 点字典 / manifest / 导入 / 查询 / 保留期
+├── client   客户端 SDK：专有二进制数据流与 server 交互（JDK HttpClient + Jackson，可集成外部 Java 应用）
 ├── server  Spring Boot 3：REST API + 导入编排（CSV 解析在此层）+ 后台任务（启动初始化、保留期清理）
 └── ui      管理页面：Thymeleaf 模板 + 原生 JS（表管理、导入、查询、统计）
 ```
@@ -286,6 +287,8 @@ interface ColumnCodec {
 | POST | `/api/importSnapshots` | 批量导入：多 CSV + 严格递增 timestamps（multipart），一次落盘减少 fsync |
 | POST | `/api/importAsync` | 异步导入：同 importSnapshot，立即返回 `{taskId}`，后台执行（适合大文件） |
 | POST | `/api/importStatus` | 查询异步导入任务状态（RUNNING/SUCCESS/FAILED + rowCount/error） |
+| POST | `/api/importBinary` | 二进制导入（列式协议：列名/类型/nullable/位图/有效值），table/timestamp query 参数 |
+| POST | `/api/queryFullSnapshotBinary` | 二进制全量快照（响应含列名/类型/nullable/位图/有效值，含主键列） |
 | GET | `/api/health` | 健康检查：status/version/tables/dataDir/dataDirWritable/uptimeMs（鉴权开启时放行） |
 
 说明：所有操作均使用 POST；参数（除 `importSnapshot` 的 CSV 文件外）统一放入 JSON 请求体。
