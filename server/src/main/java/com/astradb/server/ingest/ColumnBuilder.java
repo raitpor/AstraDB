@@ -13,13 +13,19 @@ final class ColumnBuilder {
     private long[] longs = new long[4096];
     private double[] doubles = new double[4096];
     private String[] strings = new String[4096];
+    private long[] nullBitmap;
     private int size;
 
     ColumnBuilder(ColumnType type) {
         this.type = type;
     }
 
-    void add(String raw) {
+    /** 追加字段值；nullable 且字段为空 → 写入 null。 */
+    void add(String raw, boolean nullable) {
+        if (raw.isEmpty() && nullable) {
+            addNull();
+            return;
+        }
         try {
             switch (type) {
                 case INT -> addInt(Integer.parseInt(raw.trim()));
@@ -31,6 +37,16 @@ final class ColumnBuilder {
             throw new com.astradb.core.ingest.SnapshotIngestor.IngestException(
                     "无法解析为 " + type + ": '" + raw + "'");
         }
+    }
+
+    /** 追加一个 null 行（占位值 0/0.0/null 由数组默认值承担）。 */
+    void addNull() {
+        ensureCapacity();
+        if (nullBitmap == null) {
+            nullBitmap = new long[(ints.length + 63) / 64]; // 与当前容量对齐（ensureCapacity 已先调用）
+        }
+        nullBitmap[size >>> 6] |= 1L << (size & 63);
+        size++;
     }
 
     void addInt(int v) {
@@ -60,15 +76,19 @@ final class ColumnBuilder {
             longs = java.util.Arrays.copyOf(longs, cap);
             doubles = java.util.Arrays.copyOf(doubles, cap);
             strings = java.util.Arrays.copyOf(strings, cap);
+            if (nullBitmap != null) {
+                nullBitmap = java.util.Arrays.copyOf(nullBitmap, (cap + 63) / 64);
+            }
         }
     }
 
     Column build() {
+        long[] bm = nullBitmap == null ? null : java.util.Arrays.copyOf(nullBitmap, (size + 63) / 64);
         return switch (type) {
-            case INT -> Column.ofInts(java.util.Arrays.copyOf(ints, size));
-            case LONG -> Column.ofLongs(java.util.Arrays.copyOf(longs, size));
-            case DOUBLE -> Column.ofDoubles(java.util.Arrays.copyOf(doubles, size));
-            case STRING -> Column.ofStrings(java.util.Arrays.copyOf(strings, size));
+            case INT -> Column.ofInts(java.util.Arrays.copyOf(ints, size), bm);
+            case LONG -> Column.ofLongs(java.util.Arrays.copyOf(longs, size), bm);
+            case DOUBLE -> Column.ofDoubles(java.util.Arrays.copyOf(doubles, size), bm);
+            case STRING -> Column.ofStrings(java.util.Arrays.copyOf(strings, size), bm);
         };
     }
 

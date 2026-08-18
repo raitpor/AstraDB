@@ -22,7 +22,10 @@ public final class SegmentFormat {
     public static final byte[] FOOTER_MAGIC = "SEGF".getBytes(StandardCharsets.US_ASCII);
     public static final byte[] FOOTER_END_MAGIC = "SEGE".getBytes(StandardCharsets.US_ASCII);
 
-    public static final int FORMAT_VERSION = 1;
+    /** 当前格式版本（v2：列偏移表含 flags，可空列带 null 位图）。v1 不再兼容读取。 */
+    public static final int FORMAT_VERSION = 2;
+    /** 旧格式版本（仅测试/空间对比保留写入能力）。 */
+    public static final int FORMAT_VERSION_1 = 1;
     public static final int LAYOUT = 1;
 
     public static final int FILE_HEADER_SIZE = 21;
@@ -89,7 +92,8 @@ public final class SegmentFormat {
         }
         int version = readShort(h, 4);
         if (version != FORMAT_VERSION) {
-            throw new IOException("不支持的格式版本: " + version);
+            throw new IOException("数据文件格式不兼容（v" + version + "，当前仅支持 v" + FORMAT_VERSION
+                    + "）；旧格式数据需重新导入");
         }
         long segmentStartTime = readLong(h, 7);
         int schemaVersion = readShort(h, 15);

@@ -121,7 +121,7 @@ public final class PointSeriesQuery {
                 for (int c = 1; c < columnCount; c++) {
                     ChunkCodec.RawColumn rc = SnapshotQuery.rawColumn(cache, table.name(),
                             seg.path(), i, c, chunk, compressor);
-                    vals.add(CodecRegistry.of(rc.codecId()).valueAt(rc.raw(), row));
+                    vals.add(ChunkCodec.valueAtRaw(rc, row));
                 }
                 out.add(new PointRecord(ts, vals));
                 if (out.size() >= limit) {

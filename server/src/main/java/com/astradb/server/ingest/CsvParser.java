@@ -29,6 +29,10 @@ public final class CsvParser {
         for (Schema.ColumnDef def : schema.columns()) {
             builders.add(new ColumnBuilder(def.type()));
         }
+        List<Boolean> nullableFlags = new ArrayList<>(schema.columnCount());
+        for (Schema.ColumnDef def : schema.columns()) {
+            nullableFlags.add(def.nullable());
+        }
 
         int columnCount = schema.columnCount();
         List<String> fields = new ArrayList<>(columnCount);
@@ -79,7 +83,7 @@ public final class CsvParser {
                                 + ", 实际 " + fields.size());
                     }
                     for (int i = 0; i < columnCount; i++) {
-                        builders.get(i).add(fields.get(i));
+                        builders.get(i).add(fields.get(i), nullableFlags.get(i));
                     }
                     rowNum++;
                     fields.clear();
@@ -104,7 +108,7 @@ public final class CsvParser {
                     throw new com.astradb.core.ingest.SnapshotIngestor.IngestException("CSV 最后一行列数不符: 期望 " + columnCount + ", 实际 " + fields.size());
                 }
                 for (int i = 0; i < columnCount; i++) {
-                    builders.get(i).add(fields.get(i));
+                    builders.get(i).add(fields.get(i), nullableFlags.get(i));
                 }
                 rowNum++;
             }

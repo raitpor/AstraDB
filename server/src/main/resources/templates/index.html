@@ -34,7 +34,7 @@
                 <label>压缩等级</label><input id="tlevel" type="number" value="3" min="1" max="22" style="width:70px">
             </div>
             <table id="colTable">
-                <thead><tr><th>列名</th><th>类型</th><th></th></tr></thead>
+                <thead><tr><th>列名</th><th>类型</th><th>可空</th><th></th></tr></thead>
                 <tbody></tbody>
             </table>
             <div class="point-box">
@@ -55,6 +55,7 @@
         const tr = document.createElement('tr');
         tr.innerHTML = '<td><input class="cname" required></td>' +
             '<td><select class="ctype"><option>INT</option><option>LONG</option><option>DOUBLE</option><option>STRING</option></select></td>' +
+            '<td><input type="checkbox" class="cnull"></td>' +
             '<td><button type="button" class="ghost" onclick="this.closest(\'tr\').remove()">删除</button></td>';
         tbody.appendChild(tr);
     }

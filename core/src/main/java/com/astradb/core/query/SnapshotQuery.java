@@ -1,6 +1,7 @@
 package com.astradb.core.query;
 
 import com.astradb.core.codec.CodecRegistry;
+import com.astradb.core.codec.ColumnCodec;
 import com.astradb.core.compress.Compressor;
 import com.astradb.core.manifest.Manifest;
 import com.astradb.core.meta.Column;
@@ -107,9 +108,20 @@ public final class SnapshotQuery {
                                        ChunkCache cache, Located loc, int col, int from, int to, boolean full) {
         ChunkCodec.RawColumn rc = rawColumn(cache, table.name(), loc.segRel(), loc.chunkIdx(), col,
                 loc.chunk(), compressor);
-        return full
-                ? CodecRegistry.of(rc.codecId()).decode(rc.raw())
-                : CodecRegistry.of(rc.codecId()).decodeRange(rc.raw(), from, to);
+        ColumnCodec codec = CodecRegistry.of(rc.codecId());
+        if (rc.nullBitmap() == null) {
+            return full ? codec.decode(rc.raw()) : codec.decodeRange(rc.raw(), from, to);
+        }
+        if (rc.raw().length == 0) {
+            return ChunkCodec.allNullColumnPublic(rc.columnType(), full ? rc.totalRows() : to - from);
+        }
+        if (full) {
+            return ChunkCodec.expand(codec.decode(rc.raw()), rc.nullBitmap(), rc.totalRows());
+        }
+        int p1 = ChunkCodec.prefixNull(rc.nullBitmap(), from);
+        int p2 = ChunkCodec.prefixNull(rc.nullBitmap(), to);
+        return ChunkCodec.expandRange(codec.decodeRange(rc.raw(), from - p1, to - p2),
+                rc.nullBitmap(), from, to);
     }
 
     /** 取列原始字节：优先命中 LRU 缓存，否则 zstd 解压并入缓存。 */

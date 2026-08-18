@@ -26,7 +26,10 @@ public class TableController {
         this.service = service;
     }
 
-    public record ColumnDef(String name, ColumnType type) {
+    public record ColumnDef(String name, ColumnType type, Boolean nullable) {
+        public ColumnDef(String name, ColumnType type) {
+            this(name, type, null);
+        }
     }
 
     public record CreateTableRequest(String name, List<ColumnDef> columns, String primaryKey,
@@ -42,7 +45,7 @@ public class TableController {
     @PostMapping("/createTable")
     public AstraDB.TableInfo createTable(@RequestBody CreateTableRequest req) throws IOException {
         List<Schema.ColumnDef> defs = req.columns().stream()
-                .map(c -> new Schema.ColumnDef(c.name(), c.type()))
+                .map(c -> new Schema.ColumnDef(c.name(), c.type(), Boolean.TRUE.equals(c.nullable())))
                 .toList();
         return service.db().createTable(req.name(), defs, req.primaryKey(),
                 req.retentionDays() != null ? req.retentionDays() : AstraDB.DEFAULT_RETENTION_DAYS,

@@ -106,6 +106,17 @@ public final class SnapshotIngestor {
             if (expected != actual) {
                 throw new IngestException("第 " + (i + 1) + " 列类型不符：期望 " + expected + "，实际 " + actual);
             }
+            // nullable 约束：非空列出现 null → 拒绝（含主键列）
+            if (!schema.columns().get(i).nullable()) {
+                Column c = data.columns().get(i);
+                if (c.hasNullBitmap()) {
+                    for (int r = 0; r < data.rowCount(); r++) {
+                        if (c.isNull(r)) {
+                            throw new IngestException("第 " + (i + 1) + " 列不允许为空（第 " + (r + 1) + " 行）");
+                        }
+                    }
+                }
+            }
         }
         List<Column> columns = data.columns();
         int n = data.rowCount();

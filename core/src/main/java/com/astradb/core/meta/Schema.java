@@ -9,11 +9,15 @@ import java.util.Objects;
  */
 public final class Schema {
 
-    /** 列定义。 */
-    public record ColumnDef(String name, ColumnType type) {
+    /** 列定义。nullable=true 表示允许该列存在空值（null）；主键列强制非空。 */
+    public record ColumnDef(String name, ColumnType type, boolean nullable) {
         public ColumnDef {
             Objects.requireNonNull(name, "name");
             Objects.requireNonNull(type, "type");
+        }
+
+        public ColumnDef(String name, ColumnType type) {
+            this(name, type, false);
         }
     }
 
@@ -27,6 +31,10 @@ public final class Schema {
         }
         if (primaryKeyIndex < 0 || primaryKeyIndex >= columns.size()) {
             throw new IllegalArgumentException("invalid primaryKeyIndex: " + primaryKeyIndex);
+        }
+        // 主键列强制非空（design 7.1）
+        if (columns.get(primaryKeyIndex).nullable()) {
+            throw new IllegalArgumentException("主键列不允许为可空: " + columns.get(primaryKeyIndex).name());
         }
         this.version = version;
         this.columns = List.copyOf(columns);

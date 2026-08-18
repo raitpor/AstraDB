@@ -41,11 +41,12 @@ QueryResult queryFullSnapshot(String table, long timestamp)       // columns + r
 ```
 magic(4B 'ASDB') + version(1B=1) + flags(1B: bit0=压缩标记, 预留) + columnCount(2B LE)
 对每列: columnName(varint len + UTF-8) + columnType(1B: 1=INT, 2=LONG, 3=DOUBLE, 4=STRING)
+       + nullable(1B: 0/1) + nullBitmap(ceil(rowCount/8) 字节，仅 nullable 且含 null 时写)
 rowCount(varint)
-对每列数据（列式，与存储列缓冲对齐）:
-  INT    : rowCount × int32（LE）
-  LONG   : rowCount × int64（LE）
-  DOUBLE : rowCount × float64（LE, IEEE754）
+对每列数据（列式，与存储列缓冲对齐；nullable 列仅编码非 null 有效值，null 位置由位图标记）:
+  INT    : 有效值数 × int32（LE）
+  LONG   : 有效值数 × int64（LE）
+  DOUBLE : 有效值数 × float64（LE, IEEE754）
   STRING : 逐值 varint 字节长度 + UTF-8 字节
 ```
 
