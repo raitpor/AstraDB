@@ -185,10 +185,10 @@ curl -X POST $BASE/api/getPointSeries -H 'Content-Type: application/json' \
 ## 测试
 
 ```bash
-mvn test    # 99 项自动化测试（core 83 + server 16），含性能基准/鉴权/并行/异步导入/回填删除用例
+mvn test    # 40 项自动化测试（core 24 + client 9 + server 7），场景驱动/属性/契约组织（编码属性/生命周期/导入回填删除/并发/二进制协议/API/安全）
 ```
 
-测试计划、用例、缺陷跟踪与报告见 [docs/test/](docs/test/)。
+测试计划与用例、历史报告已归档；缺陷跟踪见 [docs/test/defects.md](docs/test/defects.md)（D-01~D-09 全部关闭）。
 
 ## 目录结构
 
@@ -199,7 +199,7 @@ mvn test    # 99 项自动化测试（core 83 + server 16），含性能基准/�
 ├── docs/
 │   ├── scenario.md         # 场景文档
 │   ├── design.md           # 设计文档
-│   └── test/               # 测试计划/用例/缺陷/报告
+│   └── test/               # 缺陷跟踪（defects.md；测试计划/用例/报告已归档）
 └── .mvn/maven.config       # Maven 本地仓库指向 .m2-repository
 ```
 

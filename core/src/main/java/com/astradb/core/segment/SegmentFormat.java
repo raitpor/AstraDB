@@ -22,10 +22,8 @@ public final class SegmentFormat {
     public static final byte[] FOOTER_MAGIC = "SEGF".getBytes(StandardCharsets.US_ASCII);
     public static final byte[] FOOTER_END_MAGIC = "SEGE".getBytes(StandardCharsets.US_ASCII);
 
-    /** 当前格式版本（v2：列偏移表含 flags，可空列带 null 位图）。v1 不再兼容读取。 */
+    /** 当前格式版本（v2：列偏移表含 flags，可空列带 null 位图）。 */
     public static final int FORMAT_VERSION = 2;
-    /** 旧格式版本（仅测试/空间对比保留写入能力）。 */
-    public static final int FORMAT_VERSION_1 = 1;
     public static final int LAYOUT = 1;
 
     public static final int FILE_HEADER_SIZE = 21;

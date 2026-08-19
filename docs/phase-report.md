@@ -1,6 +1,6 @@
 # AstraDB 阶段交付报告
 
-> 版本：v1.1 · 日期：2026-08-17 · 状态：正式
+> 版本：v1.2 · 日期：2026-08-19 · 状态：正式
 > 说明：本报告核对当前实现与 [design.md](./design.md) 的一致性。前序"实现领先项"已全部同步 design.md（16.3/16.4/11.1/11.3），本版实现与文档基本一致。
 
 ---
@@ -18,6 +18,7 @@
 | M6 查询性能与运维 | 段句柄池化、跨段并行查询、流式大响应、统一错误码、慢查询日志、配置外置、异步导入 | ✅ 完成 |
 | 架构演进 | CsvParser 迁移至 server（core 仅接收 SnapshotData/BatchSnapshot）；core 导入前列数+列类型校验 | ✅ 完成 |
 | M7 数据订正 | 任意时间戳回填（段重写插入，段内有序）+ 删除指定时间快照（deleteSnapshot，窗口精确重算）；批量导入支持中间回填 | ✅ 完成 |
+| M8 可空列与 client SDK | nullable v2（null 位图 + 有效值序列，格式 v2 不兼容旧数据）+ client 模块（二进制数据流协议：ingest/queryFullSnapshot/queryPointAt + 认证）+ server 二进制端点（importBinary/queryFullSnapshotBinary） | ✅ 完成 |
 
 ## 2. 功能核对（实现 vs design.md）
 
@@ -38,7 +39,7 @@
 
 | design 章节 | 设计要点 | 实现状态 | 同步状态 |
 |---|---|---|---|
-| 11.1 API | 18 个端点（含 listSegments/importSnapshots/importAsync/importStatus/deleteSnapshot/health） | ✅ | 同步 |
+| 11.1 API | 20 个端点（含 listSegments/importSnapshots/importAsync/importStatus/deleteSnapshot/importBinary/queryFullSnapshotBinary/health） | ✅ | 同步 |
 | 11.2 后台任务 | 启动初始化、保留期定时 | ✅ | 同步 |
 | 11.3 配置 | data-dir/compression-level/timezone/cache-mb/slow-query/security + ASTRA_DB_* 环境变量 | ✅ | 同步 |
 | 12 管理页面 | 统计卡片、按时间戳浏览、搜索点、导入联动（同步/异步）、段详情弹窗/删除 | ✅ | 同步 |
@@ -64,8 +65,8 @@
 
 | 项 | 数值 |
 |---|---|
-| 自动化测试 | **99 项**（core 83 + server 16），`mvn test` BUILD SUCCESS |
-| 测试文档 | docs/test/ 下 13 份（综合/core/opt/opt2 计划·用例·报告 + 缺陷跟踪） |
+| 自动化测试 | **40 项**（core 24 + client 9 + server 7）全绿；组织为场景驱动/属性/契约测试（编码属性/生命周期/导入回填删除/并发/二进制协议/API/安全） |
+| 测试文档 | 测试计划/用例/历史报告已归档；docs/test/ 保留缺陷跟踪（defects.md，D-01~D-09 全部关闭） |
 | 缺陷 | D-01~D-09 **全部关闭**（CSV 引号、页面内联、删表空响应、时间戳乱序、空主键、valueAt 装箱、security 配置回归、CSV 格式错误 500、manifest 双重计数） |
 | 已知问题 | K-01~K-04 **全部解决**（精确窗口、表级锁、UI 验证、百万行压测） |
 | 性能基准 | 20 万行写入 414ms / 读取 342ms；批量 3×10 万行 90ms vs 逐条 224ms；百万行写入 1485ms / 读取 2558ms；流式全量 105000 行 4.1MB 0.80s；池化后单点历史连查 1.32s→1.20s |
@@ -90,4 +91,4 @@
 
 ## 7. 结论
 
-AstraDB 按设计文档完成 M1~M7 全部里程碑及后续增量迭代与架构演进：存储核心、查询语义（精确匹配/区间解码/并行/流式）、导入解耦（CSV 在 server、core 校验）、任意时间戳回填与快照删除（段重写，段内有序）、性能优化、安全部署、管理页面（含异步导入）均达设计目标；99 项自动化测试全绿、缺陷（D-01~D-09）与已知问题（K-01~K-04）全部关闭。实现与 design.md 已基本同步，可进入下一阶段（可选：聚合查询/导出/流式导入/可观测指标/CI）。
+AstraDB 按设计文档完成 M1~M8 全部里程碑及后续增量迭代与架构演进：存储核心、查询语义（精确匹配/区间解码/并行/流式）、导入解耦（CSV 在 server、core 校验）、任意时间戳回填与快照删除（段重写，段内有序）、nullable v2（可空列位图）、client SDK（二进制数据流协议）、性能优化、安全部署、管理页面（含异步导入）均达设计目标；归档前 118 项自动化测试全绿、全链条端到端（功能/性能/安全）验证通过、缺陷（D-01~D-09）与已知问题（K-01~K-04）全部关闭。实现与 design.md 已基本同步。

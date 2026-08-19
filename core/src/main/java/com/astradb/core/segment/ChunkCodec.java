@@ -29,42 +29,32 @@ import java.util.zip.CRC32C;
  *     全非空列 flags=0、不写位图（零空间开销）。
  *   尾部:   CRC32C(4B)，覆盖 [0, len-4)
  * </pre>
- * 格式 v1（FORMAT_VERSION_1，仅空间对比/测试用）：列偏移表 n × [offset length codecId]（9B），
- * 无位图（null 行以占位值参与编码）。
  */
 public final class ChunkCodec {
 
     public static final int HEADER_FIXED = 16;
-    public static final int COL_TABLE_ENTRY = 10;   // v2
-    public static final int COL_TABLE_ENTRY_V1 = 9; // v1（仅对比用）
+    public static final int COL_TABLE_ENTRY = 10;
     public static final int CRC_BYTES = 4;
     public static final int FLAG_HAS_NULL_BITMAP = 1;
 
     private ChunkCodec() {
     }
 
-    /** 生产编码：格式 v2。 */
+    /** 编码（格式 v2：列块 = [列类型 1B][uncompressedLen][zstd(位图(可选) + 有效值编码)]）。 */
     public static byte[] encode(Chunk chunk, Compressor compressor) {
-        return encode(chunk, compressor, SegmentFormat.FORMAT_VERSION);
-    }
-
-    /** 按指定格式版本编码（v1 仅空间对比/兼容性测试用）。 */
-    public static byte[] encode(Chunk chunk, Compressor compressor, int formatVersion) {
-        boolean v2 = formatVersion >= SegmentFormat.FORMAT_VERSION;
-        int entrySize = v2 ? COL_TABLE_ENTRY : COL_TABLE_ENTRY_V1;
+        int entrySize = COL_TABLE_ENTRY;
         int n = chunk.columnCount();
         int headerSize = HEADER_FIXED + entrySize * n;
 
         byte[][] colBlocks = new byte[n][];
-        byte[] flags = v2 ? new byte[n] : null;
+        byte[] flags = new byte[n];
         int dataSize = 0;
         for (int i = 0; i < n; i++) {
             Column col = chunk.column(i);
             ColumnCodec codec = CodecRegistry.of(CodecRegistry.idOf(col.type()));
-            // v2 列块 = [列类型 1B][uncompressedLen][zstd(位图(可选) + 有效值编码)]
             // 类型字节放在 zstd 流之外：避免破坏 zstd 块内压缩（type 进流会触发跨块边界、压缩率暴跌）
             ByteBuf payloadBuf = new ByteBuf(16);
-            if (v2 && col.hasNullBitmap()) {
+            if (col.hasNullBitmap()) {
                 // 可空列：位图 + 有效值序列
                 byte[] bitmapBytes = bitmapToBytes(col.nullBitmap(), chunk.rowCount());
                 Column compact = col.compact();
@@ -83,9 +73,7 @@ public final class ChunkCodec {
             byte[] payload = payloadBuf.toArray();
             byte[] compressed = compressor.compress(payload);
             ByteBuf block = new ByteBuf(16 + compressed.length);
-            if (v2) {
-                block.writeByte(col.type().ordinal());
-            }
+            block.writeByte(col.type().ordinal());
             block.writeUInt(payload.length);
             block.writeBytes(compressed);
             colBlocks[i] = block.toArray();
@@ -102,9 +90,7 @@ public final class ChunkCodec {
             out.writeInt(offset);
             out.writeInt(colBlocks[i].length);
             out.writeByte(CodecRegistry.idOf(chunk.column(i).type()));
-            if (v2) {
-                out.writeByte(flags[i]);
-            }
+            out.writeByte(flags[i]);
             offset += colBlocks[i].length;
         }
         for (byte[] b : colBlocks) {
