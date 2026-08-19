@@ -4,8 +4,7 @@ import com.astradb.client.protocol.BinaryProtocol;
 import com.astradb.client.protocol.BinaryProtocol.ColumnDef;
 import com.astradb.client.protocol.BinaryProtocol.ColumnType;
 import com.astradb.client.protocol.BinaryProtocol.Frame;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.astradb.client.ClientJson.Node;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -31,7 +30,6 @@ import java.util.List;
  */
 public final class AstraDbClient {
 
-    private static final ObjectMapper JSON = new ObjectMapper();
     private static final Duration TIMEOUT = Duration.ofSeconds(60);
 
     private final String baseUrl;
@@ -62,16 +60,16 @@ public final class AstraDbClient {
             throw new ClientException("INVALID_ARGUMENT", "数据不能为空");
         }
         // 拉取 schema：校验列数/类型，取得列名（协议帧携带列名）
-        JsonNode info = postJson("/api/getTableInfo", "{\"table\":\"" + escape(table) + "\"}");
-        JsonNode colsNode = info.path("schema").path("columns");
-        int schemaCols = colsNode.size();
+        Node info = postJson("/api/getTableInfo", "{\"table\":\"" + escape(table) + "\"}");
+        Node colsNode = info.get("schema").get("columns");
+        int schemaCols = colsNode.asArray().size();
         List<String> names = new ArrayList<>(schemaCols);
         List<ColumnType> schemaTypes = new ArrayList<>(schemaCols);
-        for (JsonNode c : colsNode) {
-            names.add(c.path("name").asText());
-            schemaTypes.add(columnTypeOf(c.path("type").asText()));
+        for (Node c : colsNode.asArray()) {
+            names.add(c.get("name").asText());
+            schemaTypes.add(columnTypeOf(c.get("type").asText()));
         }
-        int dataCols = data.get(0).size();
+        int dataCols = data.getFirst().size();
         if (dataCols != schemaCols) {
             throw new ClientException("TYPE_MISMATCH", "列数不符：期望 " + schemaCols + "，实际 " + dataCols);
         }
@@ -85,8 +83,9 @@ public final class AstraDbClient {
 
         Frame frame = BinaryProtocol.encodeRows(data, names, schemaTypes);
         byte[] body = encodeFrame(frame);
-        JsonNode resp = postBinary("/api/importBinary?table=" + encodeQuery(table) + "&timestamp=" + timestamp, body);
-        return resp.path("rowCount").asInt(-1);
+        Node resp = postBinary("/api/importBinary?table=" + encodeQuery(table) + "&timestamp=" + timestamp, body);
+        Node rc = resp.get("rowCount");
+        return rc == null ? -1 : (int) rc.asLong();
     }
 
     // ---- 全量快照查询 ----
@@ -126,21 +125,22 @@ public final class AstraDbClient {
     public Object[] queryPointAt(String table, String key, long timestamp) {
         String body = "{\"table\":\"" + escape(table) + "\",\"key\":\"" + escape(key)
                 + "\",\"from\":" + timestamp + ",\"to\":" + timestamp + ",\"limit\":1}";
-        JsonNode resp = postJson("/api/getPointSeries", body);
-        if (!resp.isArray() || resp.isEmpty()) {
+        Node resp = postJson("/api/getPointSeries", body);
+        List<Node> arr = resp.asArray();
+        if (arr.isEmpty()) {
             return null;
         }
-        JsonNode values = resp.get(0).path("values");
+        List<Node> values = arr.get(0).get("values").asArray();
         Object[] out = new Object[values.size()];
         for (int i = 0; i < values.size(); i++) {
-            JsonNode v = values.get(i);
+            Node v = values.get(i);
             if (v.isNull()) {
                 out[i] = null;
             } else if (v.isNumber()) {
-                if (v.isFloatingPointNumber()) {
+                if (v.isFloatingPoint()) {
                     out[i] = v.asDouble();
                 } else {
-                    out[i] = v.longValue();
+                    out[i] = v.asLong();
                 }
             } else {
                 out[i] = v.asText();
@@ -173,9 +173,11 @@ public final class AstraDbClient {
     }
 
     public List<String> listTables() {
-        JsonNode resp = postJson("/api/listTables", "{}");
+        Node resp = postJson("/api/listTables", "{}");
         List<String> out = new ArrayList<>();
-        resp.forEach(n -> out.add(n.asText()));
+        for (Node n : resp.asArray()) {
+            out.add(n.asText());
+        }
         return out;
     }
 
@@ -217,7 +219,7 @@ public final class AstraDbClient {
         }
     }
 
-    private JsonNode postJson(String path, String body) {
+    private Node postJson(String path, String body) {
         try {
             HttpRequest.Builder rb = HttpRequest.newBuilder(URI.create(baseUrl + path))
                     .timeout(TIMEOUT)
@@ -225,7 +227,11 @@ public final class AstraDbClient {
                     .POST(HttpRequest.BodyPublishers.ofString(body));
             HttpResponse<byte[]> resp = http.send(applyAuth(rb).build(), HttpResponse.BodyHandlers.ofByteArray());
             ensureOk(resp, path);
-            return JSON.readTree(resp.body());
+            try {
+                return ClientJson.parse(new String(resp.body(), StandardCharsets.UTF_8));
+            } catch (RuntimeException e) {
+                throw new ClientException("PROTOCOL_ERROR", "响应解析失败: " + e.getMessage());
+            }
         } catch (IOException e) {
             throw new ClientException("NETWORK_ERROR", "请求失败: " + e.getMessage());
         } catch (InterruptedException e) {
@@ -234,11 +240,11 @@ public final class AstraDbClient {
         }
     }
 
-    private JsonNode postBinary(String path, byte[] body) {
+    private Node postBinary(String path, byte[] body) {
         byte[] resp = postBinaryReturn(path, body);
         try {
-            return JSON.readTree(resp);
-        } catch (IOException e) {
+            return ClientJson.parse(new String(resp, StandardCharsets.UTF_8));
+        } catch (RuntimeException e) {
             throw new ClientException("PROTOCOL_ERROR", "响应解析失败: " + e.getMessage());
         }
     }
@@ -289,10 +295,16 @@ public final class AstraDbClient {
         String code = "HTTP_" + resp.statusCode();
         String message = "HTTP " + resp.statusCode();
         try {
-            JsonNode err = JSON.readTree(resp.body());
-            code = err.path("code").asText(code);
-            message = err.path("message").asText(message);
-        } catch (IOException ignored) {
+            Node err = ClientJson.parse(new String(resp.body(), StandardCharsets.UTF_8));
+            Node c = err.get("code");
+            Node m = err.get("message");
+            if (c != null) {
+                code = c.asText();
+            }
+            if (m != null) {
+                message = m.asText();
+            }
+        } catch (RuntimeException ignored) {
             // 非 JSON 错误体
         }
         if (resp.statusCode() == 401) {

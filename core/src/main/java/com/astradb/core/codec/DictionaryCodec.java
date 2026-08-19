@@ -134,7 +134,7 @@ public final class DictionaryCodec implements ColumnCodec {
             }
             dict[i] = new String(utf8, StandardCharsets.UTF_8);
         }
-        long id = 0;
+        long id;
         for (int i = 0; i < from; i++) {
             id = in.readUInt(); // 跳过 from 行
         }

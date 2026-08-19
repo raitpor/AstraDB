@@ -2,6 +2,7 @@
 target/
 .reasonix/
 reasonix*
+.idea/
 .vscode/
 .mvn/
 data/

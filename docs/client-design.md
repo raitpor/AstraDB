@@ -13,7 +13,7 @@
 
 ## 2. 模块结构
 
-- 根 pom 新增 `<module>client</module>`；`client/pom.xml`（Java 25，依赖 `jackson-databind`，**不依赖 core/server**，可独立打包供外部引用）
+- 根 pom 新增 `<module>client</module>`；`client/pom.xml`（Java 25，**零第三方依赖**——仅 JDK HttpClient + 自含最小 JSON（ClientJson）与二进制协议；不依赖 core/server，可独立打包供外部引用，避免与宿主应用 Jackson 版本冲突）
 - 包结构：
   - `AstraDbClient`：门面（构造 / ingest / queryFullSnapshot）
   - `QueryResult`：`record(String[] columns, List<Object[]> rows)`（行数据对齐列名）

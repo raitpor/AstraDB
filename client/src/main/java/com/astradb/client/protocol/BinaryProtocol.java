@@ -204,7 +204,7 @@ public final class BinaryProtocol {
         if (rows == null || rows.isEmpty()) {
             throw new IllegalArgumentException("数据不能为空");
         }
-        int cols = rows.get(0).size();
+        int cols = rows.getFirst().size();
         List<ColumnDef> defs = new ArrayList<>(cols);
         for (int c = 0; c < cols; c++) {
             String name = names != null && c < names.size() ? names.get(c) : "";

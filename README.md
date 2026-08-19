@@ -83,7 +83,7 @@ java -jar server/target/astradb-server-0.1.0-SNAPSHOT.jar \
 
 ### Java Client SDK（二进制数据流）
 
-独立 Maven 模块 `astradb-client`（JDK HttpClient + Jackson，无 Spring 依赖），以专有列式二进制协议与 server 交换数据（流式/高密度/精确类型）。
+独立 Maven 模块 `astradb-client`（**零第三方依赖**：仅 JDK HttpClient + 自含最小 JSON 与二进制协议，无 Spring/Jackson 依赖——可安全集成到任意 Spring Boot 应用，避免 Jackson 版本冲突），以专有列式二进制协议与 server 交换数据（流式/高密度/精确类型）。
 
 ```xml
 <dependency>
