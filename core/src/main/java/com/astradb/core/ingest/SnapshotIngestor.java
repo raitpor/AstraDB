@@ -16,6 +16,7 @@ import com.astradb.core.segment.SegmentWriter;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -238,6 +239,14 @@ public final class SnapshotIngestor {
         for (PreparedChunk p : prepared) {
             bySeg.computeIfAbsent(p.segPath(), k -> new ArrayList<>()).add(p);
         }
+        // O-01 批量导入原子化：新段先写 staging 临时段（segments/.staging/*.tmp），
+        // 全部完成后统一 rename 到正式路径 + manifest 一次保存 → 崩溃时全有或全无。
+        // 已有段 append 保持快路径（崩溃恢复截断丢弃未完成 chunk，旧数据安全、重导幂等）。
+        record StagingEntry(Path staging, Path target, List<PreparedChunk> chunks,
+                             int minKey, int maxKey, long rows) {
+        }
+        Path stagingDir = table.dir().resolve("segments/.staging");
+        java.util.List<StagingEntry> pendingRename = new java.util.ArrayList<>();
         for (Map.Entry<Path, List<PreparedChunk>> e : bySeg.entrySet()) {
             Path segPath = e.getKey();
             List<PreparedChunk> chunks = e.getValue();
@@ -250,15 +259,16 @@ public final class SnapshotIngestor {
                 maxKey = Math.max(maxKey, p.maxKey());
             }
             if (!Files.exists(segPath)) {
-                try (SegmentWriter w = SegmentWriter.create(segPath,
+                // 新段：写 staging，全部写完统一 rename（保留年份目录结构）
+                Files.createDirectories(stagingDir);
+                Path staging = stagingDir.resolve(segPath.getFileName().toString() + ".tmp");
+                try (SegmentWriter w = SegmentWriter.create(staging,
                         SegmentPaths.dayStart(chunks.get(0).ts(), zone), schema.version(), schema.columnCount())) {
                     for (PreparedChunk p : chunks) {
                         w.append(p.chunkBytes(), p.ts(), p.rowCount());
                     }
                 }
-                mergeSegmentInfo(manifest, table, segPath,
-                        SegmentPaths.dayStart(chunks.get(0).ts(), zone), chunks.get(chunks.size() - 1).ts(),
-                        chunks.size(), rows, minKey, maxKey, Files.size(segPath));
+                pendingRename.add(new StagingEntry(staging, segPath, chunks, minKey, maxKey, rows));
                 continue;
             }
             // 段存在：校验批内与旧段时间戳重复，再决定 append 快路径或重写合并
@@ -296,6 +306,19 @@ public final class SnapshotIngestor {
             mergeSegmentInfo(manifest, table, segPath,
                     SegmentPaths.dayStart(chunks.get(0).ts(), zone), chunks.get(chunks.size() - 1).ts(),
                     chunks.size(), rows, minKey, maxKey, Files.size(segPath));
+        }
+        // 新段 staging 统一 rename（同文件系统原子）；失败则清理残留（全有或全无）
+        if (!pendingRename.isEmpty()) {
+            for (StagingEntry se : pendingRename) {
+                Files.createDirectories(se.target().getParent());
+                Files.move(se.staging(), se.target(), StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+                List<PreparedChunk> c = se.chunks();
+                mergeSegmentInfo(manifest, table, se.target(),
+                        SegmentPaths.dayStart(c.get(0).ts(), zone), c.get(c.size() - 1).ts(),
+                        c.size(), se.rows(), se.minKey(), se.maxKey(), Files.size(se.target()));
+                evict.accept(se.target());
+            }
         }
         manifest.save();
     }

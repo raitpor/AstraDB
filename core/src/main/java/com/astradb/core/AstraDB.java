@@ -40,6 +40,9 @@ import java.util.stream.Stream;
  */
 public final class AstraDB implements AutoCloseable {
 
+    private static final java.util.logging.Logger LOG =
+            java.util.logging.Logger.getLogger(AstraDB.class.getName());
+
     public static final String VERSION = "0.1.0";
     public static final int DEFAULT_COMPRESSION_LEVEL = 3;
     public static final int DEFAULT_RETENTION_DAYS = 1825; // 5 年
@@ -88,6 +91,156 @@ public final class AstraDB implements AutoCloseable {
     private final ChunkCache cache;
     /** 段文件句柄空闲池（复用 FileChannel，减少查询反复打开/关闭）。 */
     private final SegmentChannelCache segmentChannels;
+    /** dataDir 排他文件锁（防多进程同目录互写，O-03）。 */
+    private java.nio.channels.FileLock dataDirLock;
+    /** 幂等导入记录（O-02）：table\0ts → 数据哈希与结果；同内容重放跳过，异内容拒绝。 */
+    private final java.util.LinkedHashMap<String, IdemEntry> idempotency = new java.util.LinkedHashMap<>() {
+        @Override
+        protected boolean removeEldestEntry(java.util.Map.Entry<String, IdemEntry> eldest) {
+            return size() > IDEMPOTENCY_MAX;
+        }
+    };
+
+    private static final int IDEMPOTENCY_MAX = 100_000;
+
+    private record IdemEntry(long hash, int rowCount, int newPoints, long timestamp) {
+    }
+
+    private static String idemKey(String table, long ts) {
+        return table + "\u0000" + ts;
+    }
+
+    /** S-3：段内是否已含该时间戳（轻量，仅占位命中时调用；表写锁内）。 */
+    private boolean timestampExists(TableState st, long ts) {
+        Manifest.SegmentInfo si = st.manifest.lastAtOrBefore(ts);
+        if (si == null) {
+            return false;
+        }
+        try (SegmentReader r = SegmentReader.open(st.meta.dir().resolve(si.path()), null)) {
+            int idx = r.findChunkAtOrBefore(ts);
+            return idx >= 0 && r.timestampAt(idx) == ts;
+        } catch (IOException e) {
+            return false; // 段读取失败 → 视为未提交（导入时重复 ts 会拒绝，安全方向）
+        }
+    }
+
+    private static final int IDEM_ENTRY_BYTES = 24;      // ts(8) + hash64(8) + rowCount(4) + newPoints(4)
+    private static final long IDEM_FILE_MAX_ENTRIES = 200_000;
+
+    private static Path idemFile(Path tableDir) {
+        return tableDir.resolve("idempotency.idx");
+    }
+
+    /** 追加一条幂等记录并 fsync（崩溃重启后重放仍可判定）。
+     *  若文件尾为同 ts 占位记录（rowCount<0）则截断该条再写正式记录，避免占位+正式双条残留。 */
+    private static void appendIdem(Path tableDir, IdemEntry e) {
+        try {
+            Path f = idemFile(tableDir);
+            long entries = Files.exists(f) ? Files.size(f) / IDEM_ENTRY_BYTES : 0;
+            if (entries >= IDEM_FILE_MAX_ENTRIES) {
+                rewriteIdem(tableDir);
+            }
+            try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(f,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.READ,
+                    java.nio.file.StandardOpenOption.WRITE)) {
+                long size = ch.size();
+                if (size >= IDEM_ENTRY_BYTES) {
+                    java.nio.ByteBuffer tail = java.nio.ByteBuffer.allocate(IDEM_ENTRY_BYTES);
+                    ch.read(tail, size - IDEM_ENTRY_BYTES);
+                    tail.flip();
+                    long tailTs = tail.getLong();
+                    tail.getLong();
+                    int tailRc = tail.getInt();
+                    if (tailTs == e.timestamp() && tailRc < 0) {
+                        ch.truncate(size - IDEM_ENTRY_BYTES); // 移除尾部占位
+                        size -= IDEM_ENTRY_BYTES;
+                    }
+                }
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate(IDEM_ENTRY_BYTES);
+                bb.putLong(e.timestamp()).putLong(e.hash()).putInt(e.rowCount()).putInt(e.newPoints());
+                bb.flip();
+                ch.position(size); // 追加语义（JDK 禁止 READ+APPEND 组合）
+                ch.write(bb);
+                ch.force(true);
+            }
+        } catch (IOException ex) {
+            LOG.warning("幂等记录写入失败（降级为进程内幂等）: " + ex);
+        }
+    }
+
+    /** 批量追加幂等记录：一次 open + 写 + fsync（S-2，避免每快照一次 fsync）。 */
+    private static void appendIdemBatch(Path tableDir, java.util.List<IdemEntry> es) {
+        try {
+            Path f = idemFile(tableDir);
+            long entries = Files.exists(f) ? Files.size(f) / IDEM_ENTRY_BYTES : 0;
+            if (entries + es.size() >= IDEM_FILE_MAX_ENTRIES) {
+                rewriteIdem(tableDir);
+            }
+            try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(f,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE,
+                    java.nio.file.StandardOpenOption.APPEND)) {
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate(IDEM_ENTRY_BYTES * es.size());
+                for (IdemEntry e : es) {
+                    bb.putLong(e.timestamp()).putLong(e.hash()).putInt(e.rowCount()).putInt(e.newPoints());
+                }
+                bb.flip();
+                ch.write(bb);
+                ch.force(true);
+            }
+        } catch (IOException ex) {
+            LOG.warning("幂等记录批量写入失败（降级为进程内幂等）: " + ex);
+        }
+    }
+
+    /** 幂等文件超限：保留尾部记录后重写。 */
+    private static void rewriteIdem(Path tableDir) {
+        try {
+            Path f = idemFile(tableDir);
+            long total = Files.exists(f) ? Files.size(f) / IDEM_ENTRY_BYTES : 0;
+            long keep = Math.min(total, IDEMPOTENCY_MAX);
+            try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(f,
+                    java.nio.file.StandardOpenOption.READ, java.nio.file.StandardOpenOption.WRITE)) {
+                long start = (total - keep) * IDEM_ENTRY_BYTES;
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate((int) (keep * IDEM_ENTRY_BYTES));
+                ch.read(bb, start);
+                bb.flip();
+                ch.truncate(0);
+                ch.write(bb, 0);
+                ch.force(true);
+            }
+        } catch (IOException ex) {
+            LOG.warning("幂等文件超限重写失败（保留原文件）: " + ex);
+        }
+    }
+
+    /** 启动加载表幂等记录（文件损坏 → 忽略并降级为空）。 */
+    private void loadIdem(String table, Path tableDir) {
+        try {
+            Path f = idemFile(tableDir);
+            if (!Files.exists(f)) {
+                return;
+            }
+            try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(f,
+                    java.nio.file.StandardOpenOption.READ)) {
+                long total = ch.size() / IDEM_ENTRY_BYTES;
+                long start = Math.max(0, (total - IDEMPOTENCY_MAX) * IDEM_ENTRY_BYTES);
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate((int) (ch.size() - start));
+                ch.read(bb, start);
+                bb.flip();
+                synchronized (idempotency) {
+                    while (bb.remaining() >= IDEM_ENTRY_BYTES) {
+                        long ts = bb.getLong();
+                        long hash = bb.getLong();
+                        int rc = bb.getInt();
+                        int np = bb.getInt();
+                        idempotency.put(idemKey(table, ts), new IdemEntry(hash, rc, np, ts));
+                    }
+                }
+            }
+        } catch (IOException ex) {
+            LOG.warning("幂等文件加载失败（降级为进程内幂等）: " + ex);
+        }
+    }
 
     private static final int DEFAULT_MAX_CHANNELS = 64;
 
@@ -119,12 +272,42 @@ public final class AstraDB implements AutoCloseable {
     public static AstraDB open(Path dataDir, int defaultCompressionLevel, java.time.ZoneId zone, long cacheBytes)
             throws IOException {
         Files.createDirectories(dataDir);
-        TablesStore store = TablesStore.load(dataDir);
-        AstraDB db = new AstraDB(dataDir, defaultCompressionLevel, zone, store, cacheBytes);
-        for (TableMeta meta : store.all()) {
-            db.loadTable(meta);
+        // O-03 dataDir 排他锁：防多进程同目录互写（tables.json rename / 段追加竞争）
+        Path lockFile = dataDir.resolve(".lock");
+        java.nio.channels.FileChannel lc = java.nio.channels.FileChannel.open(lockFile,
+                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
+        java.nio.channels.FileLock lock = null;
+        try {
+            try {
+                lock = lc.tryLock();
+            } catch (java.nio.channels.OverlappingFileLockException e) {
+                lock = null;
+            }
+            if (lock == null) {
+                throw new IOException("数据目录已被其他进程锁定（已有 AstraDB 实例运行）: " + dataDir);
+            }
+            TablesStore store = TablesStore.load(dataDir);
+            AstraDB db = new AstraDB(dataDir, defaultCompressionLevel, zone, store, cacheBytes);
+            db.dataDirLock = lock;
+            for (TableMeta meta : store.all()) {
+                db.loadTable(meta);
+                db.loadIdem(meta.name(), meta.dir());
+            }
+            return db;
+        } catch (IOException | RuntimeException e) {
+            // S-1：加载失败时释放锁与句柄（同 JVM 重试 open 不再误报"已被其他进程锁定"）
+            if (lock != null) {
+                try {
+                    lock.release();
+                } catch (IOException ignored) {
+                }
+            }
+            try {
+                lc.close();
+            } catch (IOException ignored) {
+            }
+            throw e;
         }
-        return db;
     }
 
     public java.time.ZoneId zone() {
@@ -367,14 +550,40 @@ public final class AstraDB implements AutoCloseable {
 
     // ---- 数据写入 ----
 
-    /** 以 SnapshotData（列缓冲）导入：唯一单快照入口（core 导入前校验表结构与列类型）。 */
+    /** 以 SnapshotData（列缓冲）导入：唯一单快照入口（core 导入前校验表结构与列类型；O-02 幂等）。 */
     public SnapshotIngestor.IngestResult ingest(String name, com.astradb.core.ingest.SnapshotData data, Long timestamp)
             throws IOException {
+        long ts = timestamp != null ? timestamp : System.currentTimeMillis();
+        long hash = data.contentHash64();
+        String key = idemKey(name, ts);
         TableState st = stateOf(name);
         st.lock.writeLock().lock();
         try {
-            return SnapshotIngestor.ingest(st.meta, st.dict, st.manifest, st.compressor, data, timestamp, zone,
-                segmentChannels::evict);
+            synchronized (idempotency) {
+                IdemEntry prev = idempotency.get(key);
+                if (prev != null && prev.hash() == hash && prev.rowCount() >= 0) {
+                    // 正式记录命中：同内容重放，跳过（幂等返回原结果）
+                    return new SnapshotIngestor.IngestResult(prev.timestamp(), prev.rowCount(), prev.newPoints());
+                }
+                if (prev != null && prev.hash() == hash && prev.rowCount() < 0) {
+                    // S-3 占位记录（段提交后、正式记录前崩溃的残留）：确认 ts 是否已提交
+                    Manifest.SegmentInfo si = st.manifest.lastAtOrBefore(ts);
+                    if (timestampExists(st, ts)) {
+                        return new SnapshotIngestor.IngestResult(ts, (int) si.rows(), (int) si.rows());
+                    }
+                    idempotency.remove(key); // 未提交：占位作废，正常导入
+                }
+                // S-3 预写占位（段提交前先落盘；崩溃后由占位命中路径确认）
+                IdemEntry placeholder = new IdemEntry(hash, -1, -1, ts);
+                idempotency.put(key, placeholder);
+                appendIdem(st.meta.dir(), placeholder);
+                SnapshotIngestor.IngestResult r = SnapshotIngestor.ingest(
+                        st.meta, st.dict, st.manifest, st.compressor, data, timestamp, zone, segmentChannels::evict);
+                IdemEntry e = new IdemEntry(hash, r.rowCount(), r.newPoints(), r.timestamp());
+                idempotency.put(key, e);
+                appendIdem(st.meta.dir(), e); // 追加正式记录（覆盖文件尾同 ts 占位，见 appendIdem）
+                return r;
+            }
         } finally {
             st.lock.writeLock().unlock();
         }
@@ -384,11 +593,57 @@ public final class AstraDB implements AutoCloseable {
     public List<SnapshotIngestor.IngestResult> ingestBatch(String name,
                                                            List<SnapshotIngestor.BatchSnapshot> snapshots)
             throws IOException {
+        // O-02 幂等：整批重放（全部命中正式记录且同内容）→ 直接返回，不写盘（无锁嵌套，快速路径）
+        java.util.List<SnapshotIngestor.IngestResult> replayed = new java.util.ArrayList<>(snapshots.size());
+        boolean allHit;
+        synchronized (idempotency) {
+            allHit = true;
+            for (SnapshotIngestor.BatchSnapshot bs : snapshots) {
+                long ts = bs.timestamp();
+                IdemEntry prev = idempotency.get(idemKey(name, ts));
+                if (prev == null || prev.hash() != bs.data().contentHash64() || prev.rowCount() < 0) {
+                    allHit = false;
+                    break;
+                }
+                replayed.add(new SnapshotIngestor.IngestResult(prev.timestamp(), prev.rowCount(), prev.newPoints()));
+            }
+        }
+        if (allHit) {
+            return replayed;
+        }
         TableState st = stateOf(name);
         st.lock.writeLock().lock();
         try {
-            return SnapshotIngestor.ingestBatch(st.meta, st.dict, st.manifest, st.compressor, snapshots, zone,
-                segmentChannels::evict);
+            // S-3 批量占位预写（表锁→幂等锁；未命中正式的快照先落盘占位）
+            java.util.List<IdemEntry> placeholders = new java.util.ArrayList<>(snapshots.size());
+            synchronized (idempotency) {
+                for (SnapshotIngestor.BatchSnapshot bs : snapshots) {
+                    long ts = bs.timestamp();
+                    IdemEntry prev = idempotency.get(idemKey(name, ts));
+                    if (prev == null || prev.hash() != bs.data().contentHash64() || prev.rowCount() < 0) {
+                        IdemEntry placeholder = new IdemEntry(bs.data().contentHash64(), -1, -1, ts);
+                        idempotency.put(idemKey(name, ts), placeholder);
+                        placeholders.add(placeholder);
+                    }
+                }
+            }
+            if (!placeholders.isEmpty()) {
+                appendIdemBatch(st.meta.dir(), placeholders); // S-2 批内一次 fsync
+            }
+            java.util.List<SnapshotIngestor.IngestResult> rs = SnapshotIngestor.ingestBatch(
+                    st.meta, st.dict, st.manifest, st.compressor, snapshots, zone, segmentChannels::evict);
+            java.util.List<IdemEntry> finals = new java.util.ArrayList<>(snapshots.size());
+            synchronized (idempotency) {
+                for (int i = 0; i < snapshots.size(); i++) {
+                    SnapshotIngestor.BatchSnapshot bs = snapshots.get(i);
+                    SnapshotIngestor.IngestResult r = rs.get(i);
+                    IdemEntry e = new IdemEntry(bs.data().contentHash64(), r.rowCount(), r.newPoints(), r.timestamp());
+                    idempotency.put(idemKey(name, bs.timestamp()), e);
+                    finals.add(e);
+                }
+            }
+            appendIdemBatch(st.meta.dir(), finals); // S-2 批内一次 fsync
+            return rs;
         } finally {
             st.lock.writeLock().unlock();
         }
@@ -625,8 +880,17 @@ public final class AstraDB implements AutoCloseable {
 
     @Override
     public void close() {
-        // 所有写入均即时落盘（fsync），无内存态需要冲刷；释放段句柄池
+        // 所有写入均即时落盘（fsync），无内存态需要冲刷；释放段句柄池与 dataDir 锁
         segmentChannels.close();
+        try {
+            if (dataDirLock != null) {
+                dataDirLock.release();
+                dataDirLock.channel().close();
+                dataDirLock = null;
+            }
+        } catch (IOException ignored) {
+            // 锁释放失败不影响关闭
+        }
     }
 
     /** 供 JSON 序列化统计引用。 */
