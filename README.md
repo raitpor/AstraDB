@@ -4,7 +4,7 @@
 
 专为"周期性全量快照 + 长期保留 + 回溯查询"负载设计：以时间分片组织快照、以时间序列编码（Gorilla）压缩值列、以主键列匹配检索点，用最小的空间保存任意历史时刻的全量状态。
 
-> 场景与设计见 [docs/scenario.md](docs/scenario.md)、[docs/design.md](docs/design.md)。
+> 场景与设计见 [docs/design/scenario.md](docs/design/scenario.md)、[docs/design/design.md](docs/design/design.md)。
 
 ## 特性
 
@@ -120,7 +120,7 @@ client.createTable("t1", List.of(
 client.listTables();
 ```
 
-二进制端点：`POST /api/importBinary`、`POST /api/queryFullSnapshotBinary`（协议见 [docs/client-design.md](docs/client-design.md)）。
+二进制端点：`POST /api/importBinary`、`POST /api/queryFullSnapshotBinary`（协议见 [docs/design/client-design.md](docs/design/client-design.md)）。
 
 ### 使用示例（curl）
 
@@ -197,9 +197,10 @@ mvn test    # 40 项自动化测试（core 24 + client 9 + server 7），场景�
 ├── core/                   # 存储引擎（纯 Java）
 ├── server/                 # Spring Boot 服务 + 管理页面
 ├── docs/
-│   ├── scenario.md         # 场景文档
-│   ├── design.md           # 设计文档
-│   └── test/               # 缺陷跟踪（defects.md；测试计划/用例/报告已归档）
+│   ├── design/             # 设计类文档（design、scenario、client-design、optimization）
+│   ├── review/             # 评审报告（review-p0.md、review.md）
+│   ├── phaseReport/        # 阶段交付报告（phase-report.md）
+│   └── test/               # 测试文档（计划/用例/报告/缺陷跟踪 defects.md）
 └── .mvn/maven.config       # Maven 本地仓库指向 .m2-repository
 ```
 

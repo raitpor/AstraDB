@@ -1,6 +1,6 @@
 # AstraDB Client 设计与二进制数据流协议
 
-> 版本：v1.1 · 状态：**已实施** · 日期：2026-08-18 · 关联：[design.md](./design.md)、[README.md](../README.md)
+> 版本：v1.1 · 状态：**已实施** · 日期：2026-08-18 · 关联：[design.md](./design.md)、[README.md](../../README.md)
 
 ## 1. 目标与范围
 
