@@ -69,7 +69,11 @@ public class BinaryDataController {
                 valuesIndex++;
             }
         }
-        BinaryProtocol.encode(new Frame(defs, (int) fs.totalRows(), data), resp.getOutputStream());
+        // 响应流加缓冲：BinaryProtocol 逐字节写，无缓冲时 10 万行响应需 120 万次单字节 IO
+        try (java.io.BufferedOutputStream bos =
+                     new java.io.BufferedOutputStream(resp.getOutputStream(), 1 << 16)) {
+            BinaryProtocol.encode(new Frame(defs, (int) fs.totalRows(), data), bos);
+        }
     }
 
     /** 由行数据（key + values）组装本列列式数据：位图 + 有效值数组。 */
@@ -78,24 +82,77 @@ public class BinaryDataController {
         int rows = (int) fs.totalRows();
         boolean nullable = sdef.nullable();
         long[] bitmap = nullable ? new long[(rows + 63) / 64] : null;
-        List<Object> eff = new ArrayList<>();
-        for (int r = 0; r < rows; r++) {
-            SnapshotQuery.Row row = fs.rows().get(r);
-            Object v;
-            if (isPk) {
-                v = parseKey(sdef.type(), row.key());
-            } else {
-                v = valuesIndex < row.values().size() ? row.values().get(valuesIndex) : null;
-            }
-            if (v == null) {
-                if (bitmap != null) {
-                    bitmap[r >>> 6] |= 1L << (r & 63);
+        // 直接以原始类型数组填充（避免 List<Object> 装箱），10 万行级组装显著提速
+        return switch (sdef.type()) {
+            case INT -> {
+                int[] a = new int[rows];
+                int eff = 0;
+                for (int r = 0; r < rows; r++) {
+                    Object v = columnValue(sdef, isPk, valuesIndex, fs.rows().get(r));
+                    if (v == null) {
+                        if (bitmap != null) {
+                            bitmap[r >>> 6] |= 1L << (r & 63);
+                        }
+                    } else {
+                        a[eff++] = ((Number) v).intValue();
+                    }
                 }
-            } else {
-                eff.add(v);
+                yield new ColumnData(bitmap, java.util.Arrays.copyOf(a, eff));
             }
+            case LONG -> {
+                long[] a = new long[rows];
+                int eff = 0;
+                for (int r = 0; r < rows; r++) {
+                    Object v = columnValue(sdef, isPk, valuesIndex, fs.rows().get(r));
+                    if (v == null) {
+                        if (bitmap != null) {
+                            bitmap[r >>> 6] |= 1L << (r & 63);
+                        }
+                    } else {
+                        a[eff++] = ((Number) v).longValue();
+                    }
+                }
+                yield new ColumnData(bitmap, java.util.Arrays.copyOf(a, eff));
+            }
+            case DOUBLE -> {
+                double[] a = new double[rows];
+                int eff = 0;
+                for (int r = 0; r < rows; r++) {
+                    Object v = columnValue(sdef, isPk, valuesIndex, fs.rows().get(r));
+                    if (v == null) {
+                        if (bitmap != null) {
+                            bitmap[r >>> 6] |= 1L << (r & 63);
+                        }
+                    } else {
+                        a[eff++] = ((Number) v).doubleValue();
+                    }
+                }
+                yield new ColumnData(bitmap, java.util.Arrays.copyOf(a, eff));
+            }
+            default -> {
+                String[] a = new String[rows];
+                int eff = 0;
+                for (int r = 0; r < rows; r++) {
+                    Object v = columnValue(sdef, isPk, valuesIndex, fs.rows().get(r));
+                    if (v == null) {
+                        if (bitmap != null) {
+                            bitmap[r >>> 6] |= 1L << (r & 63);
+                        }
+                    } else {
+                        a[eff++] = (String) v;
+                    }
+                }
+                yield new ColumnData(bitmap, java.util.Arrays.copyOf(a, eff));
+            }
+        };
+    }
+
+    private static Object columnValue(Schema.ColumnDef sdef, boolean isPk, int valuesIndex,
+                                      SnapshotQuery.Row row) {
+        if (isPk) {
+            return parseKey(sdef.type(), row.key());
         }
-        return new ColumnData(bitmap, toArray(sdef.type(), eff));
+        return valuesIndex < row.values().size() ? row.values().get(valuesIndex) : null;
     }
 
     private static Object parseKey(com.astradb.core.meta.ColumnType t, String key) {

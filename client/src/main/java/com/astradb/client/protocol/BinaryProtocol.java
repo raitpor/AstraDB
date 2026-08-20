@@ -121,6 +121,10 @@ public final class BinaryProtocol {
     // ---- 解码 ----
 
     public static Frame decode(InputStream in) throws IOException {
+        // 缓冲输入：BinaryReader 逐字节读，10 万行响应需百万次单字节调用
+        if (!(in instanceof java.io.BufferedInputStream)) {
+            in = new java.io.BufferedInputStream(in, 1 << 16);
+        }
         BinaryReader r = new BinaryReader(in);
         byte[] magic = r.readBytes(4);
         if (magic[0] != MAGIC[0] || magic[1] != MAGIC[1] || magic[2] != MAGIC[2] || magic[3] != MAGIC[3]) {

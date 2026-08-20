@@ -105,11 +105,19 @@ public final class AstraDbClient {
         for (int i = 0; i < frame.columns().size(); i++) {
             columns[i] = frame.columns().get(i).name();
         }
+        // 线性组装（每列有效值游标递增）：避免逐行 popcount 的 O(n²) 退化
+        int cols = frame.columns().size();
+        int[] effIdx = new int[cols];
         List<Object[]> rows = new ArrayList<>(frame.rowCount());
         for (int r = 0; r < frame.rowCount(); r++) {
-            Object[] row = new Object[frame.columns().size()];
-            for (int c = 0; c < frame.columns().size(); c++) {
-                row[c] = valueAt(frame, c, r);
+            Object[] row = new Object[cols];
+            for (int c = 0; c < cols; c++) {
+                long[] bitmap = frame.data().get(c).nullBitmap();
+                if (BinaryProtocol.isNull(bitmap, r)) {
+                    row[c] = null;
+                } else {
+                    row[c] = valueAtEffective(frame, c, effIdx[c]++);
+                }
             }
             rows.add(row);
         }
@@ -153,15 +161,25 @@ public final class AstraDbClient {
 
     /** 建表：columns = 列定义（name, type=INT/LONG/DOUBLE/STRING, 可选 nullable）。 */
     public void createTable(String name, List<java.util.Map<String, Object>> columns, String primaryKey) {
-        StringBuilder sb = new StringBuilder("{\"name\":\"");
-        sb.append(escape(name)).append("\",\"primaryKey\":\"").append(escape(primaryKey)).append("\",\"columns\":[");
+        createTable(name, columns, primaryKey, null);
+    }
+
+    /** 建表（可指定 zstd 压缩等级 1~22；null 使用服务端默认）。 */
+    public void createTable(String name, List<java.util.Map<String, Object>> columns, String primaryKey,
+                            Integer compressionLevel) {
+        StringBuilder sb = new StringBuilder("{\"name\":");
+        sb.append(ClientJson.quote(name)).append(",\"primaryKey\":").append(ClientJson.quote(primaryKey));
+        if (compressionLevel != null) {
+            sb.append(",\"compressionLevel\":").append(compressionLevel);
+        }
+        sb.append(",\"columns\":[");
         for (int i = 0; i < columns.size(); i++) {
             java.util.Map<String, Object> c = columns.get(i);
             if (i > 0) {
                 sb.append(',');
             }
-            sb.append("{\"name\":\"").append(escape(String.valueOf(c.get("name"))))
-                    .append("\",\"type\":\"").append(c.get("type")).append('"');
+            sb.append("{\"name\":").append(ClientJson.quote(String.valueOf(c.get("name"))))
+                    .append(",\"type\":").append(ClientJson.quote(String.valueOf(c.get("type"))));
             Object nullable = c.get("nullable");
             if (nullable != null) {
                 sb.append(",\"nullable\":").append(nullable);
@@ -170,6 +188,18 @@ public final class AstraDbClient {
         }
         sb.append("]}");
         postJson("/api/createTable", sb.toString());
+    }
+
+    /** 表信息（pointCount/segmentCount/totalRows/totalSizeBytes/schema 等）。 */
+    public java.util.Map<String, Object> getTableInfo(String table) {
+        Node info = postJson("/api/getTableInfo", "{\"table\":\"" + escape(table) + "\"}");
+        java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
+        for (String key : List.of("name", "pointCount", "segmentCount", "totalRows", "totalSizeBytes",
+                "retentionDays", "compressionLevel")) {
+            Node v = info.get(key);
+            out.put(key, v == null ? null : (v.isNumber() ? v.asLong() : v.asText()));
+        }
+        return out;
     }
 
     public List<String> listTables() {
@@ -193,19 +223,15 @@ public final class AstraDbClient {
         return null; // 该列全 null：按 schema 类型
     }
 
-    private static Object valueAt(Frame frame, int col, int row) {
+    /** 按有效值索引取值（组装期游标已换算，O(1)）。 */
+    private static Object valueAtEffective(Frame frame, int col, int effIdx) {
         ColumnDef def = frame.columns().get(col);
-        long[] bitmap = frame.data().get(col).nullBitmap();
         Object values = frame.data().get(col).values();
-        if (BinaryProtocol.isNull(bitmap, row)) {
-            return null;
-        }
-        int idx = row - (bitmap == null ? 0 : BinaryProtocol.popcount(bitmap, row));
         return switch (def.type()) {
-            case INT -> ((int[]) values)[idx];
-            case LONG -> ((long[]) values)[idx];
-            case DOUBLE -> ((double[]) values)[idx];
-            case STRING -> ((String[]) values)[idx];
+            case INT -> ((int[]) values)[effIdx];
+            case LONG -> ((long[]) values)[effIdx];
+            case DOUBLE -> ((double[]) values)[effIdx];
+            case STRING -> ((String[]) values)[effIdx];
         };
     }
 
