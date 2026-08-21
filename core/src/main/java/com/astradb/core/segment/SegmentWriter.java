@@ -138,17 +138,22 @@ public final class SegmentWriter implements AutoCloseable {
         if (closed) {
             return;
         }
-        long indexOffset = dataEnd;
-        raf.seek(indexOffset);
-        for (ChunkIndexEntry e : entries) {
-            byte[] b = e.toBytes();
-            raf.write(b);
-            crc64.update(b); // 校验和覆盖 chunk 区 + 索引区
+        try {
+            long indexOffset = dataEnd;
+            raf.seek(indexOffset);
+            for (ChunkIndexEntry e : entries) {
+                byte[] b = e.toBytes();
+                raf.write(b);
+                crc64.update(b); // 校验和覆盖 chunk 区 + 索引区
+            }
+            long checksum = crc64.digest();
+            raf.write(SegmentFormat.buildFooter(indexOffset, entries.size(), checksum));
+            raf.getFD().sync();
+        } finally {
+            // SF-8：sync 失败（异常路径）也关闭句柄，避免泄漏 RandomAccessFile；
+            // closed 无论成败置位，writer 不再可用（文件状态已不确定）。
+            closed = true;
+            raf.close();
         }
-        long checksum = crc64.digest();
-        raf.write(SegmentFormat.buildFooter(indexOffset, entries.size(), checksum));
-        raf.getFD().sync();
-        closed = true;
-        raf.close();
     }
 }

@@ -86,12 +86,14 @@ class IngestBackfillDeleteTest {
                     () -> db.ingestBatch("t", List.of(
                             new BatchSnapshot(TestSupport.csv("1,9.0\n", TestSupport.simpleColumns(false)), T0 + 100),
                             new BatchSnapshot(TestSupport.csv("1,8.0\n", TestSupport.simpleColumns(false)), T0))));
-            // 与已有快照重复拒绝（单条与批量）
+            // 与已有快照重复拒绝（内容不同 → 拒绝；单条/批量导入失败都会留下占位记录，
+            // 之后同内容重试会命中占位确认（ts 已提交 → 确认成功，SF-2/SF-6 语义），
+            // 故两条断言用不同已存在 ts，互不干扰）
             assertThrows(SnapshotIngestor.IngestException.class,
                     () -> db.ingest("t", TestSupport.csv("1,9.0\n", TestSupport.simpleColumns(false)), T0));
             assertThrows(SnapshotIngestor.IngestException.class,
                     () -> db.ingestBatch("t", List.of(
-                            new BatchSnapshot(TestSupport.csv("1,9.0\n", TestSupport.simpleColumns(false)), T0))));
+                            new BatchSnapshot(TestSupport.csv("1,9.0\n", TestSupport.simpleColumns(false)), T0 + 600_000))));
         }
     }
 

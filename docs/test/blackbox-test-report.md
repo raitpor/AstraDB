@@ -1,9 +1,9 @@
 # AstraDB 黑盒测试报告
 
-> 版本：v1.1 · 日期：2026-08-21 · 状态：**通过（1 项缺陷 D-12 挂起）**
+> 版本：v1.2 · 日期：2026-08-21 · 状态：**通过（缺陷全部关闭）**
 > 关联：[scenario.md](../design/scenario.md)（场景）、[design.md](../design/design.md)（设计）、[defects.md](./defects.md)（缺陷跟踪）
 > 执行方式：根目录 `test/` 独立测试工程（不挂主构建，**未改动任何非测试代码**），真实启动 server jar + HTTP API 黑盒验证
-> 变更：v1.1 追加第 8 节"定时导入长测"（spring @Scheduled + astradb-client，每 1 分钟 1000 条 ×10）
+> 变更：v1.1 追加第 8 节"定时导入长测"；v1.2 追加第 9 节"最新交付可用性测试"（R-01 SF-1~SF-8 + D-12），D-12 关闭
 
 ---
 
@@ -71,17 +71,37 @@
 
 | ID | 严重度 | 描述 | 状态 |
 |---|---|---|---|
-| D-12 | P2 | 未知 API 端点返回 **500 INTERNAL_ERROR 而非 404**（`ApiExceptionHandler` 全局 `Exception` 兜底吞掉 `NoResourceFoundException` 的 404 语义） | **新建（未修复）**，用例 `avUnknownEndpoint404` 已 `@Disabled` 引用，修复后启用 |
+| D-12 | P2 | 未知 API 端点返回 **500 INTERNAL_ERROR 而非 404**（`ApiExceptionHandler` 全局 `Exception` 兜底吞掉 `NoResourceFoundException` 的 404 语义） | **已验证（关闭）**：修复交付（`NoResourceFoundException`→404 NOT_FOUND、`HttpRequestMethodNotSupportedException`→405 METHOD_NOT_ALLOWED）后，`avUnknownEndpoint404` 解除 `@Disabled` 通过，新增 405 用例通过（见第 9 节） |
 
-> 完整缺陷记录见 [defects.md](./defects.md)（D-01~D-11 已关闭，D-12 挂起）。
+> 完整缺陷记录见 [defects.md](./defects.md)：D-01~D-12 **全部关闭**，K-01~K-04 已解决。
 
 ## 7. 结论与建议
 
 **结论**：AstraDB 在场景文档定义的负载下**可用性、完整性、安全性总体达标**——24 项黑盒用例 23 项通过，未发现数据丢失/损坏类缺陷；崩溃恢复（kill -9 重启数据完好）、幂等重放、路径穿越防护、鉴权控制、confirm 防误删等关键可靠性/安全行为均验证通过。
 
 **遗留**：
-1. **D-12（P2）**：未知端点 500 而非 404——建议在 `ApiExceptionHandler` 增加 `NoResourceFoundException` → 404 映射（结构化错误体），修复后启用 `avUnknownEndpoint404` 并回归；
-2. **建议**：将 `test/` 黑盒工程纳入 CI（构建 server jar → 跑黑盒）；性能专项（写入/读取时延 ≤5s/≤2s 的 scenario 约束）建议后续以黑盒方式补充计时断言。
+1. **建议**：将 `test/` 黑盒工程纳入 CI（构建 server jar → 跑黑盒）；性能专项（写入/读取时延 ≤5s/≤2s 的 scenario 约束）建议后续以黑盒方式补充计时断言；
+2. R-01（SF-1~SF-8）中的 SF-5/SF-6/SF-7/SF-8 为内部语义/持久化细节，黑盒不可直接观测，由 core 层 `ReviewShouldFixTest`（7 项）覆盖。
+
+## 9. 最新交付可用性测试（R-01 SF-1~SF-8 + D-12，2026-08-21 追加）
+
+> 针对交付文档：[D-12 修复交付](../phaseReport/D-12-unknown-endpoint-404.md)、[R-01 修复交付](../phaseReport/R-01-review-shouldfix.md)。
+> 测试代码：`test/src/test/java/com/astradb/blackbox/LatestDeliveryAvailabilityTest.java`（7 项，黑盒：HTTP + 文件系统行为）。
+> 执行结果：`mvn -f test/pom.xml test -Dtest=LatestDeliveryAvailabilityTest` → **Tests run: 7, Failures: 0, Errors: 0**；黑盒全量 31 项 BUILD SUCCESS。
+
+| ID | 用例 | 验证的交付 | 结果 |
+|---|---|---|---|
+| LD-01 | 未知端点 → 404 + 结构化错误码 `NOT_FOUND`（无堆栈泄露） | D-12 | ✅ 通过 |
+| LD-02 | 方法不支持（GET 打 POST 端点）→ 405 + `METHOD_NOT_ALLOWED` | D-12（顺带补充） | ✅ 通过 |
+| LD-03 | **损坏段隔离**：篡改段文件 → 重启 → 库仍启动（health UP）、好表数据完好、坏段从 manifest 剔除且隔离至 `segments/.quarantine/*.corrupt` | R-01 SF-3 | ✅ 通过 |
+| LD-04 | **删除快照后同内容重放真正写入**（幂等记录随删除清理，快照可恢复） | R-01 SF-1 | ✅ 通过 |
+| LD-05 | **混合批导入**：部分命中正式记录 → 重放 + 其余新增，不抛"时间戳已存在"，3 快照数据正确 | R-01 SF-2 | ✅ 通过 |
+| LD-06 | **跨表并发导入**：两表同时导入均成功、数据正确（互不阻塞） | R-01 SF-4 | ✅ 通过 |
+| LD-07 | 常规回归：健康/建表/导入/查询/删表全流程可用 | 回归 | ✅ 通过 |
+
+### 结论
+
+**最新交付可用性验证通过**：D-12 错误语义修复（404/405）与 R-01 可靠性修复（SF-1 幂等清理、SF-2 混合批、SF-3 损坏段隔离、SF-4 跨表并行）经黑盒验证全部生效且无回归——特别是 **SF-3**：单段损坏不再阻塞整个库启动，好数据可用、坏段隔离留证，可用性显著提升；D-12 关闭。缺陷全部清零（D-01~D-12 关闭，K-01~K-04 解决）。
 
 ## 8. 定时导入长测（spring @Scheduled + astradb-client，2026-08-21 追加）
 

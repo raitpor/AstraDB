@@ -13,6 +13,7 @@ import com.astradb.core.segment.SegmentPaths;
 import com.astradb.core.segment.SegmentReader;
 import com.astradb.core.segment.SegmentRewriter;
 import com.astradb.core.segment.SegmentWriter;
+import com.astradb.core.util.FsUtil;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -239,8 +240,9 @@ public final class SnapshotIngestor {
         for (PreparedChunk p : prepared) {
             bySeg.computeIfAbsent(p.segPath(), k -> new ArrayList<>()).add(p);
         }
-        // O-01 批量导入原子化：新段先写 staging 临时段（segments/.staging/*.tmp），
-        // 全部完成后统一 rename 到正式路径 + manifest 一次保存 → 崩溃时全有或全无。
+        // O-01 批量导入近似原子：新段先写 staging 临时段（segments/.staging/*.tmp），
+        // 全部完成后统一 rename 到正式路径 + manifest 一次保存 → 崩溃时"近似全有或全无"
+        // （逐个 rename 非严格原子：已 rename 段生效、未 rename 段留 .staging，幂等重放可覆盖，见 review SF-5）。
         // 已有段 append 保持快路径（崩溃恢复截断丢弃未完成 chunk，旧数据安全、重导幂等）。
         record StagingEntry(Path staging, Path target, List<PreparedChunk> chunks,
                              int minKey, int maxKey, long rows) {
@@ -307,12 +309,13 @@ public final class SnapshotIngestor {
                     SegmentPaths.dayStart(chunks.get(0).ts(), zone), chunks.get(chunks.size() - 1).ts(),
                     chunks.size(), rows, minKey, maxKey, Files.size(segPath));
         }
-        // 新段 staging 统一 rename（同文件系统原子）；失败则清理残留（全有或全无）
+        // 新段 staging 统一 rename（同文件系统原子）；失败则清理残留（近似全有或全无）
         if (!pendingRename.isEmpty()) {
             for (StagingEntry se : pendingRename) {
                 Files.createDirectories(se.target().getParent());
                 Files.move(se.staging(), se.target(), StandardCopyOption.ATOMIC_MOVE,
                         StandardCopyOption.REPLACE_EXISTING);
+                FsUtil.fsyncDir(se.target().getParent()); // SF-7：rename 目录项落盘
                 List<PreparedChunk> c = se.chunks();
                 mergeSegmentInfo(manifest, table, se.target(),
                         SegmentPaths.dayStart(c.get(0).ts(), zone), c.get(c.size() - 1).ts(),

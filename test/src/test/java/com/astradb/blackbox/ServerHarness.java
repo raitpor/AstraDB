@@ -157,6 +157,11 @@ public final class ServerHarness {
         return BASE + ":" + port;
     }
 
+    /** 当前 server 实例的数据目录（黑盒测试构造损坏文件等场景用）。 */
+    public static Path dataDir() {
+        return dataDir;
+    }
+
     public static String authHeader() {
         return "Basic " + Base64.getEncoder().encodeToString(
                 (ADMIN_USER + ":" + ADMIN_PASS).getBytes(StandardCharsets.UTF_8));

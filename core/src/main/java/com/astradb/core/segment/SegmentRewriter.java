@@ -1,5 +1,7 @@
 package com.astradb.core.segment;
 
+import com.astradb.core.util.FsUtil;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -76,6 +78,7 @@ public final class SegmentRewriter {
             return new RewriteResult(0, 0, Long.MIN_VALUE, true);
         }
         Files.move(tmp, segPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        FsUtil.fsyncDir(segPath.getParent()); // SF-7：替换目录项落盘
         return new RewriteResult(chunkCount, rows, endTime, false);
     }
 }

@@ -19,6 +19,7 @@ import com.astradb.core.segment.SegmentChannelCache;
 import com.astradb.core.segment.SegmentPaths;
 import com.astradb.core.segment.SegmentReader;
 import com.astradb.core.segment.SegmentRewriter;
+import com.astradb.core.util.FsUtil;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -71,6 +72,15 @@ public final class AstraDB implements AutoCloseable {
         final Compressor compressor;
         /** 表级读写锁：同表写串行、查询与写并发、跨表写并行（K-02）。 */
         final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+        /** 本表幂等记录（SF-4：per-table，跨表导入不再共享全局锁；上限 IDEMPOTENCY_MAX/表）。 */
+        final java.util.Map<String, IdemEntry> idempotency = new java.util.LinkedHashMap<>() {
+            @Override
+            protected boolean removeEldestEntry(java.util.Map.Entry<String, IdemEntry> eldest) {
+                return size() > IDEMPOTENCY_MAX;
+            }
+        };
+        /** 本表幂等锁：快速路径（表锁外检查）与慢路径（表写锁内）共用；锁序 global read → table write → idem。 */
+        final Object idemLock = new Object();
 
         TableState(TableMeta meta, PointDictionary dict, Manifest manifest, Compressor compressor) {
             this.meta = meta;
@@ -93,13 +103,6 @@ public final class AstraDB implements AutoCloseable {
     private final SegmentChannelCache segmentChannels;
     /** dataDir 排他文件锁（防多进程同目录互写，O-03）。 */
     private java.nio.channels.FileLock dataDirLock;
-    /** 幂等导入记录（O-02）：table\0ts → 数据哈希与结果；同内容重放跳过，异内容拒绝。 */
-    private final java.util.LinkedHashMap<String, IdemEntry> idempotency = new java.util.LinkedHashMap<>() {
-        @Override
-        protected boolean removeEldestEntry(java.util.Map.Entry<String, IdemEntry> eldest) {
-            return size() > IDEMPOTENCY_MAX;
-        }
-    };
 
     private static final int IDEMPOTENCY_MAX = 100_000;
 
@@ -110,17 +113,21 @@ public final class AstraDB implements AutoCloseable {
         return table + "\u0000" + ts;
     }
 
-    /** S-3：段内是否已含该时间戳（轻量，仅占位命中时调用；表写锁内）。 */
-    private boolean timestampExists(TableState st, long ts) {
+    /** S-3：段内是否已含该时间戳（轻量，仅占位命中时调用；表写锁内）。
+     *  @return 该 ts 所在 chunk 的精确行数；不存在返回 -1（SF-6：占位确认路径不再误用整段行数）。 */
+    private int timestampRowCount(TableState st, long ts) {
         Manifest.SegmentInfo si = st.manifest.lastAtOrBefore(ts);
         if (si == null) {
-            return false;
+            return -1;
         }
         try (SegmentReader r = SegmentReader.open(st.meta.dir().resolve(si.path()), null)) {
             int idx = r.findChunkAtOrBefore(ts);
-            return idx >= 0 && r.timestampAt(idx) == ts;
+            if (idx >= 0 && r.timestampAt(idx) == ts) {
+                return r.entry(idx).rowCount();
+            }
+            return -1;
         } catch (IOException e) {
-            return false; // 段读取失败 → 视为未提交（导入时重复 ts 会拒绝，安全方向）
+            return -1; // 段读取失败 → 视为未提交（导入时重复 ts 会拒绝，安全方向）
         }
     }
 
@@ -213,8 +220,75 @@ public final class AstraDB implements AutoCloseable {
         }
     }
 
+    /** SF-1：删除快照/段后清理对应 ts 的幂等记录：内存 map 移除 + 磁盘幂等文件原子重写（表写锁内调用）。 */
+    private void removeIdem(TableState st, java.util.Set<Long> tsSet) {
+        if (tsSet == null || tsSet.isEmpty()) {
+            return;
+        }
+        synchronized (st.idemLock) {
+            for (long ts : tsSet) {
+                st.idempotency.remove(idemKey(st.meta.name(), ts));
+            }
+        }
+        rewriteIdemExcluding(st.meta.dir(), tsSet);
+    }
+
+    /** 重写幂等文件，剔除指定 ts（SF-1 删除路径）：临时文件 + fsync + 原子替换 + 目录 fsync；
+     *  全部剔除时直接删除文件。失败仅告警（进程内已移除；磁盘残留会在重启后重新加载，
+     *  同 ts 同内容重放仍可能被跳过——与幂等写入失败的降级语义一致）。 */
+    private static void rewriteIdemExcluding(Path tableDir, java.util.Set<Long> exclude) {
+        try {
+            Path f = idemFile(tableDir);
+            if (!Files.exists(f) || Files.size(f) == 0) {
+                return;
+            }
+            java.util.List<IdemEntry> keep = new java.util.ArrayList<>();
+            try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(f,
+                    java.nio.file.StandardOpenOption.READ)) {
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate((int) Files.size(f));
+                ch.read(bb, 0);
+                bb.flip();
+                while (bb.remaining() >= IDEM_ENTRY_BYTES) {
+                    long ts = bb.getLong();
+                    long hash = bb.getLong();
+                    int rc = bb.getInt();
+                    int np = bb.getInt();
+                    if (!exclude.contains(ts)) {
+                        keep.add(new IdemEntry(hash, rc, np, ts));
+                    }
+                }
+            }
+            if (keep.isEmpty()) {
+                Files.deleteIfExists(f);
+                FsUtil.fsyncDir(tableDir);
+                return;
+            }
+            Path tmp = f.resolveSibling(f.getFileName() + ".tmp");
+            try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(tmp,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE,
+                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)) {
+                java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate(IDEM_ENTRY_BYTES * keep.size());
+                for (IdemEntry e : keep) {
+                    bb.putLong(e.timestamp()).putLong(e.hash()).putInt(e.rowCount()).putInt(e.newPoints());
+                }
+                bb.flip();
+                ch.write(bb);
+                ch.force(true);
+            }
+            Files.move(tmp, f, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            FsUtil.fsyncDir(tableDir);
+        } catch (IOException ex) {
+            LOG.warning("幂等记录删除重写失败（进程内已移除，磁盘残留重启后可能重新生效）: " + ex);
+        }
+    }
+
     /** 启动加载表幂等记录（文件损坏 → 忽略并降级为空）。 */
     private void loadIdem(String table, Path tableDir) {
+        TableState st = states.get(table);
+        if (st == null) {
+            return;
+        }
         try {
             Path f = idemFile(tableDir);
             if (!Files.exists(f)) {
@@ -227,13 +301,13 @@ public final class AstraDB implements AutoCloseable {
                 java.nio.ByteBuffer bb = java.nio.ByteBuffer.allocate((int) (ch.size() - start));
                 ch.read(bb, start);
                 bb.flip();
-                synchronized (idempotency) {
+                synchronized (st.idemLock) {
                     while (bb.remaining() >= IDEM_ENTRY_BYTES) {
                         long ts = bb.getLong();
                         long hash = bb.getLong();
                         int rc = bb.getInt();
                         int np = bb.getInt();
-                        idempotency.put(idemKey(table, ts), new IdemEntry(hash, rc, np, ts));
+                        st.idempotency.put(idemKey(table, ts), new IdemEntry(hash, rc, np, ts));
                     }
                 }
             }
@@ -368,12 +442,24 @@ public final class AstraDB implements AutoCloseable {
                 for (Path p : walk.filter(Files::isRegularFile)
                         .filter(p -> p.getFileName().toString().endsWith(".seg")).toList()) {
                     String rel = SegmentPaths.relative(p, meta.dir());
+                    Manifest.SegmentInfo light;
+                    try {
+                        light = describeSegmentLight(meta, p, rel, channels);
+                    } catch (IOException | RuntimeException e) {
+                        // SF-3：损坏段启动隔离，不阻塞整个库打开
+                        quarantineCorruptSegment(meta, p, rel, e);
+                        continue;
+                    }
                     disk.add(rel);
-                    Manifest.SegmentInfo light = describeSegmentLight(meta, p, rel, channels);
                     Manifest.SegmentInfo old = findSegment(manifest, rel);
                     if (old == null || !sameSegmentInfo(old, light)) {
                         // 缺失或信息漂移 → 精确重建（解码主键列计算 minKey/maxKey）
-                        diskInfos.add(describeSegmentPrecise(meta, p, rel, compressor, channels));
+                        try {
+                            diskInfos.add(describeSegmentPrecise(meta, p, rel, compressor, channels));
+                        } catch (IOException | RuntimeException e) {
+                            // 轻量描述通过但解码损坏（bit rot 在数据区）→ 同样隔离
+                            quarantineCorruptSegment(meta, p, rel, e);
+                        }
                     }
                 }
             }
@@ -399,6 +485,34 @@ public final class AstraDB implements AutoCloseable {
     private static boolean sameSegmentInfo(Manifest.SegmentInfo a, Manifest.SegmentInfo b) {
         return a.chunkCount() == b.chunkCount() && a.rows() == b.rows()
                 && a.sizeBytes() == b.sizeBytes() && a.endTime() == b.endTime();
+    }
+
+    /** SF-3：启动隔离损坏段：移至 segments/.quarantine/（*.corrupt 后缀，启动校验不扫）并告警，
+     *  保证单个损坏段不阻塞整个库打开；隔离失败（如权限）则删除并告警（数据已不可读，
+     *  避免每次启动重复隔离）；隔离与删除均失败则抛错（维持原"库打不开"语义并留痕）。 */
+    private static void quarantineCorruptSegment(TableMeta meta, Path p, String rel, Exception cause) {
+        Path qDir = meta.dir().resolve("segments/.quarantine");
+        Path qTarget = qDir.resolve(p.getFileName() + ".corrupt");
+        try {
+            Files.createDirectories(qDir);
+            int seq = 1;
+            while (Files.exists(qTarget)) {
+                qTarget = qDir.resolve(p.getFileName() + ".corrupt." + seq++);
+            }
+            Files.move(p, qTarget);
+            LOG.warning("启动隔离损坏段 " + rel + " → " + qTarget + "（" + cause + "）");
+            FsUtil.fsyncDir(qDir); // 隔离目录 rename 目录项落盘
+            FsUtil.fsyncDir(qDir.getParent()); // segments 目录 delete 目录项落盘
+        } catch (IOException moveFailed) {
+            try {
+                Files.deleteIfExists(p);
+                LOG.warning("损坏段隔离失败，已删除（数据不可读）: " + rel + "（" + cause + "）");
+                FsUtil.fsyncDir(p.getParent());
+            } catch (IOException delFailed) {
+                LOG.severe("损坏段既无法隔离也无法删除，启动失败: " + rel + "（" + cause + "）");
+                throw new IllegalStateException("损坏段处理失败: " + rel, cause);
+            }
+        }
     }
 
     /** 轻量描述：仅读段头与 ChunkIndex（不解码数据列），min/max 占位。 */
@@ -559,28 +673,29 @@ public final class AstraDB implements AutoCloseable {
         TableState st = stateOf(name);
         st.lock.writeLock().lock();
         try {
-            synchronized (idempotency) {
-                IdemEntry prev = idempotency.get(key);
+            synchronized (st.idemLock) {
+                IdemEntry prev = st.idempotency.get(key);
                 if (prev != null && prev.hash() == hash && prev.rowCount() >= 0) {
                     // 正式记录命中：同内容重放，跳过（幂等返回原结果）
                     return new SnapshotIngestor.IngestResult(prev.timestamp(), prev.rowCount(), prev.newPoints());
                 }
                 if (prev != null && prev.hash() == hash && prev.rowCount() < 0) {
                     // S-3 占位记录（段提交后、正式记录前崩溃的残留）：确认 ts 是否已提交
-                    Manifest.SegmentInfo si = st.manifest.lastAtOrBefore(ts);
-                    if (timestampExists(st, ts)) {
-                        return new SnapshotIngestor.IngestResult(ts, (int) si.rows(), (int) si.rows());
+                    int rows = timestampRowCount(st, ts);
+                    if (rows >= 0) {
+                        // SF-6：返回精确 chunk 行数；newPoints 无法从已合并点字典恢复，置 0（标注语义）
+                        return new SnapshotIngestor.IngestResult(ts, rows, 0);
                     }
-                    idempotency.remove(key); // 未提交：占位作废，正常导入
+                    st.idempotency.remove(key); // 未提交：占位作废，正常导入
                 }
                 // S-3 预写占位（段提交前先落盘；崩溃后由占位命中路径确认）
                 IdemEntry placeholder = new IdemEntry(hash, -1, -1, ts);
-                idempotency.put(key, placeholder);
+                st.idempotency.put(key, placeholder);
                 appendIdem(st.meta.dir(), placeholder);
                 SnapshotIngestor.IngestResult r = SnapshotIngestor.ingest(
                         st.meta, st.dict, st.manifest, st.compressor, data, timestamp, zone, segmentChannels::evict);
                 IdemEntry e = new IdemEntry(hash, r.rowCount(), r.newPoints(), r.timestamp());
-                idempotency.put(key, e);
+                st.idempotency.put(key, e);
                 appendIdem(st.meta.dir(), e); // 追加正式记录（覆盖文件尾同 ts 占位，见 appendIdem）
                 return r;
             }
@@ -593,14 +708,15 @@ public final class AstraDB implements AutoCloseable {
     public List<SnapshotIngestor.IngestResult> ingestBatch(String name,
                                                            List<SnapshotIngestor.BatchSnapshot> snapshots)
             throws IOException {
-        // O-02 幂等：整批重放（全部命中正式记录且同内容）→ 直接返回，不写盘（无锁嵌套，快速路径）
+        // O-02 幂等：整批重放（全部命中正式记录且同内容）→ 直接返回，不写盘（快速路径）
+        TableState st = stateOf(name);
         java.util.List<SnapshotIngestor.IngestResult> replayed = new java.util.ArrayList<>(snapshots.size());
         boolean allHit;
-        synchronized (idempotency) {
+        synchronized (st.idemLock) {
             allHit = true;
             for (SnapshotIngestor.BatchSnapshot bs : snapshots) {
                 long ts = bs.timestamp();
-                IdemEntry prev = idempotency.get(idemKey(name, ts));
+                IdemEntry prev = st.idempotency.get(idemKey(name, ts));
                 if (prev == null || prev.hash() != bs.data().contentHash64() || prev.rowCount() < 0) {
                     allHit = false;
                     break;
@@ -611,39 +727,75 @@ public final class AstraDB implements AutoCloseable {
         if (allHit) {
             return replayed;
         }
-        TableState st = stateOf(name);
         st.lock.writeLock().lock();
         try {
-            // S-3 批量占位预写（表锁→幂等锁；未命中正式的快照先落盘占位）
+            // SF-2 混合批：批内部分快照可能已命中正式幂等记录 → 重放返回；仅未命中者进入 ingestBatch。
+            // 占位记录（rowCount<0）先确认 ts 是否已提交：已提交 → 精确返回；未提交 → 作废并重新导入。
+            java.util.List<SnapshotIngestor.BatchSnapshot> toIngest = new java.util.ArrayList<>(snapshots.size());
             java.util.List<IdemEntry> placeholders = new java.util.ArrayList<>(snapshots.size());
-            synchronized (idempotency) {
-                for (SnapshotIngestor.BatchSnapshot bs : snapshots) {
+            java.util.List<SnapshotIngestor.IngestResult> confirmed = new java.util.ArrayList<>(snapshots.size());
+            int[] ingestPos = new int[snapshots.size()]; // 原序 → toIngest 序；-1 表示该位置已确认（重放/占位确认）
+            java.util.Arrays.fill(ingestPos, -1);
+            synchronized (st.idemLock) {
+                for (int i = 0; i < snapshots.size(); i++) {
+                    SnapshotIngestor.BatchSnapshot bs = snapshots.get(i);
                     long ts = bs.timestamp();
-                    IdemEntry prev = idempotency.get(idemKey(name, ts));
-                    if (prev == null || prev.hash() != bs.data().contentHash64() || prev.rowCount() < 0) {
-                        IdemEntry placeholder = new IdemEntry(bs.data().contentHash64(), -1, -1, ts);
-                        idempotency.put(idemKey(name, ts), placeholder);
-                        placeholders.add(placeholder);
+                    long hash = bs.data().contentHash64();
+                    String key = idemKey(name, ts);
+                    IdemEntry prev = st.idempotency.get(key);
+                    if (prev != null && prev.hash() == hash && prev.rowCount() >= 0) {
+                        // 正式记录命中：同内容重放（幂等返回原结果）
+                        confirmed.add(new SnapshotIngestor.IngestResult(prev.timestamp(), prev.rowCount(), prev.newPoints()));
+                        continue;
                     }
+                    if (prev != null && prev.hash() == hash && prev.rowCount() < 0) {
+                        // 占位记录残留：确认 ts 是否已提交（S-3，崩溃现场）
+                        int rows = timestampRowCount(st, ts);
+                        if (rows >= 0) {
+                            confirmed.add(new SnapshotIngestor.IngestResult(ts, rows, 0)); // SF-6 语义
+                            continue;
+                        }
+                        st.idempotency.remove(key); // 未提交：占位作废，正常导入
+                    }
+                    ingestPos[i] = toIngest.size();
+                    toIngest.add(bs);
+                    IdemEntry placeholder = new IdemEntry(hash, -1, -1, ts);
+                    st.idempotency.put(key, placeholder); // S-3 预写占位
+                    placeholders.add(placeholder);
                 }
             }
             if (!placeholders.isEmpty()) {
                 appendIdemBatch(st.meta.dir(), placeholders); // S-2 批内一次 fsync
             }
-            java.util.List<SnapshotIngestor.IngestResult> rs = SnapshotIngestor.ingestBatch(
-                    st.meta, st.dict, st.manifest, st.compressor, snapshots, zone, segmentChannels::evict);
-            java.util.List<IdemEntry> finals = new java.util.ArrayList<>(snapshots.size());
-            synchronized (idempotency) {
-                for (int i = 0; i < snapshots.size(); i++) {
-                    SnapshotIngestor.BatchSnapshot bs = snapshots.get(i);
+            java.util.List<SnapshotIngestor.IngestResult> rs = toIngest.isEmpty()
+                    ? java.util.List.of()
+                    : SnapshotIngestor.ingestBatch(st.meta, st.dict, st.manifest, st.compressor,
+                            toIngest, zone, segmentChannels::evict);
+            java.util.List<IdemEntry> finals = new java.util.ArrayList<>(toIngest.size());
+            if (!toIngest.isEmpty()) {
+                for (int i = 0; i < toIngest.size(); i++) {
+                    SnapshotIngestor.BatchSnapshot bs = toIngest.get(i);
                     SnapshotIngestor.IngestResult r = rs.get(i);
-                    IdemEntry e = new IdemEntry(bs.data().contentHash64(), r.rowCount(), r.newPoints(), r.timestamp());
-                    idempotency.put(idemKey(name, bs.timestamp()), e);
-                    finals.add(e);
+                    finals.add(new IdemEntry(bs.data().contentHash64(), r.rowCount(), r.newPoints(), r.timestamp()));
+                }
+                synchronized (st.idemLock) {
+                    for (int i = 0; i < toIngest.size(); i++) {
+                        st.idempotency.put(idemKey(name, toIngest.get(i).timestamp()), finals.get(i));
+                    }
+                }
+                appendIdemBatch(st.meta.dir(), finals); // S-2 批内一次 fsync
+            }
+            // 按原顺序合并结果：重放/占位确认 + 本次导入
+            java.util.List<SnapshotIngestor.IngestResult> out = new java.util.ArrayList<>(snapshots.size());
+            int confirmedIdx = 0;
+            for (int i = 0; i < snapshots.size(); i++) {
+                if (ingestPos[i] >= 0) {
+                    out.add(rs.get(ingestPos[i]));
+                } else {
+                    out.add(confirmed.get(confirmedIdx++));
                 }
             }
-            appendIdemBatch(st.meta.dir(), finals); // S-2 批内一次 fsync
-            return rs;
+            return out;
         } finally {
             st.lock.writeLock().unlock();
         }
@@ -694,7 +846,8 @@ public final class AstraDB implements AutoCloseable {
         TableState st = stateOf(name);
         st.lock.writeLock().lock();
         try {
-            return RetentionCleaner.clean(st.meta, st.manifest, now, segmentChannels);
+            return RetentionCleaner.clean(st.meta, st.manifest, now, segmentChannels,
+                    tsSet -> removeIdem(st, tsSet)); // SF-1：清理被删段的幂等记录
         } finally {
             st.lock.writeLock().unlock();
         }
@@ -768,10 +921,19 @@ public final class AstraDB implements AutoCloseable {
             if (info == null) {
                 throw new IllegalArgumentException("段不存在（manifest 未记录）: " + relativePath);
             }
+            // SF-1：删除段前枚举段内全部时间戳，供删除后清理幂等记录（防同 ts 同内容重放被静默跳过）
+            java.util.Set<Long> tsSet = new java.util.HashSet<>();
+            try (SegmentReader r = SegmentReader.open(seg, segmentChannels)) {
+                for (int i = 0; i < r.chunkCount(); i++) {
+                    tsSet.add(r.timestampAt(i));
+                }
+            }
             segmentChannels.evict(seg);
             Files.deleteIfExists(seg);
+            FsUtil.fsyncDir(seg.getParent()); // SF-7：delete 目录项落盘
             st.manifest.remove(relativePath);
             st.manifest.save();
+            removeIdem(st, tsSet); // SF-1：删除后同步清理幂等记录
         } finally {
             st.lock.writeLock().unlock();
         }
@@ -812,6 +974,7 @@ public final class AstraDB implements AutoCloseable {
             segmentChannels.evict(segPath);
             if (res.isEmpty()) {
                 Files.deleteIfExists(segPath);
+                FsUtil.fsyncDir(segPath.getParent()); // SF-7：delete 目录项落盘
                 st.manifest.remove(seg.path());
             } else {
                 // 删除后窗口精确重算（minKey/maxKey/endTime 可能收缩）
@@ -820,6 +983,7 @@ public final class AstraDB implements AutoCloseable {
                 st.manifest.addOrMerge(precise);
             }
             st.manifest.save();
+            removeIdem(st, java.util.Set.of(ts)); // SF-1：删除快照后清理幂等记录（防同 ts 同内容重放被跳过）
         } finally {
             st.lock.writeLock().unlock();
         }

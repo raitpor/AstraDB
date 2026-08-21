@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 
+import com.astradb.core.util.FsUtil;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -40,6 +42,7 @@ public final class JsonFiles {
         byte[] data = MAPPER.writeValueAsBytes(value);
         Files.write(tmp, data);
         Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        FsUtil.fsyncDir(file.getParent()); // SF-7：rename 目录项落盘
     }
 
     public static String toJson(Object value) throws IOException {
