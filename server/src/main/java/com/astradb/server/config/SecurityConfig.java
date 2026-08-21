@@ -19,6 +19,9 @@ import org.springframework.security.web.SecurityFilterChain;
 @Configuration
 public class SecurityConfig {
 
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(SecurityConfig.class);
+
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http,
                                                   @Value("${astradb.security.enabled:false}") boolean enabled)
@@ -39,9 +42,17 @@ public class SecurityConfig {
     @Bean
     public UserDetailsService userDetailsService(
             @Value("${astradb.security.username:admin}") String username,
-            @Value("${astradb.security.password:admin123}") String password) {
+            @Value("${astradb.security.password:admin123}") String password,
+            PasswordEncoder encoder) {
+        // SS-3：不再使用 {noop} 明文口令；配置值若已带编码器前缀（如 {bcrypt}$2a$...）则原样使用，
+        // 否则按明文经 DelegatingPasswordEncoder（默认 BCrypt）编码后存储。
+        String stored = password.startsWith("{") ? password : encoder.encode(password);
+        if ("admin123".equals(password)) {
+            // 默认弱口令：仅告警不阻断（本地开发默认），生产须经 ASTRA_DB_SECURITY_PASSWORD 覆盖
+            log.warn("检测到默认口令 admin123，开启鉴权后请立即通过环境变量 ASTRA_DB_SECURITY_PASSWORD 修改");
+        }
         return new InMemoryUserDetailsManager(
-                User.withUsername(username).password("{noop}" + password).roles("ADMIN").build());
+                User.withUsername(username).password(stored).roles("ADMIN").build());
     }
 
     @Bean

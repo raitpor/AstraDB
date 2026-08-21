@@ -143,10 +143,11 @@
         }
         for (const s of segs) {
             const tr = document.createElement('tr');
-            tr.innerHTML = `<td>${s.path}</td><td>${fmtTime(s.startTime)}</td><td>${fmtTime(s.endTime)}</td>
+            // SS-4：s.path 经 esc 转义，按钮走事件委托（data-act）
+            tr.innerHTML = `<td>${esc(s.path)}</td><td>${fmtTime(s.startTime)}</td><td>${fmtTime(s.endTime)}</td>
                 <td>${s.chunkCount}</td><td>${s.rows}</td><td>${fmtBytes(s.sizeBytes)}</td>
-                <td><button class="ghost" onclick="showSegmentSnapshots('${s.path}')">查看</button>
-                    <button class="danger" onclick="deleteSegmentFile('${s.path}')">删除</button></td>`;
+                <td><button class="ghost" data-act="showSegment" data-path="${esc(s.path)}">查看</button>
+                    <button class="danger" data-act="deleteSegment" data-path="${esc(s.path)}">删除</button></td>`;
             tbody.appendChild(tr);
         }
     }
@@ -164,8 +165,9 @@
                 let html = `<div class="hint">共 ${list.length} 个快照</div>
                     <table><thead><tr><th>#</th><th>本地时间</th><th>时间戳（毫秒）</th><th>行数</th><th>操作</th></tr></thead><tbody>`;
                 list.forEach((s, i) => {
+                    // SS-4：path 经 esc 转义，删除按钮走事件委托（data-act）
                     html += `<tr><td>${i + 1}</td><td>${fmtTime(s.timestamp)}</td><td>${s.timestamp}</td><td>${s.rows}</td>`
-                        + `<td><button class="danger" onclick="deleteSnapshotAt(${s.timestamp}, '${path}')">删除</button></td></tr>`;
+                        + `<td><button class="danger" data-act="deleteSnapshot" data-ts="${s.timestamp}" data-path="${esc(path)}">删除</button></td></tr>`;
                 });
                 html += '</tbody></table>';
                 body.innerHTML = html;
@@ -224,13 +226,14 @@
                 $('browseInfo').textContent = `请求时间 ${fmtTime(ts)}`;
                 return;
             }
-            let html = '<table><tr><th>' + (schemaCols[0] || '主键') + '</th>';
-            for (let i = 1; i < schemaCols.length; i++) html += `<th>${schemaCols[i]}</th>`;
+            let html = '<table><tr><th>' + esc(schemaCols[0] || '主键') + '</th>';
+            for (let i = 1; i < schemaCols.length; i++) html += `<th>${esc(schemaCols[i])}</th>`;
             html += '</tr>';
             for (const r of rows) {
-                html += `<tr><td>${r.key}</td>`;
+                // SS-4：主键与列值（STRING 可为 <img onerror=...>）经 esc 转义
+                html += `<tr><td>${esc(r.key)}</td>`;
                 for (const v of r.values) {
-                    html += `<td>${v === null || v === undefined ? '∅' : v}</td>`;
+                    html += `<td>${v === null || v === undefined ? '∅' : esc(v)}</td>`;
                 }
                 html += '</tr>';
             }
@@ -261,9 +264,10 @@
                 return;
             }
             const last = list[list.length - 1]; // 升序列表最后一条 = 最近值
-            let html = `<div class="hint">点 ${id} · 实际快照时间 ${fmtTime(last.timestamp)}</div><div class="kv">`;
+            let html = `<div class="hint">点 ${esc(id)} · 实际快照时间 ${fmtTime(last.timestamp)}</div><div class="kv">`;
             for (let i = 0; i < last.values.length; i++) {
-                html += `<div class="item"><b>${schemaCols[i + 1] || 'c' + (i + 1)}</b> = ${last.values[i]}</div>`;
+                // SS-4：列名与值（STRING 可含 HTML）经 esc 转义
+                html += `<div class="item"><b>${esc(schemaCols[i + 1] || 'c' + (i + 1))}</b> = ${esc(last.values[i])}</div>`;
             }
             html += '</div>';
             box.innerHTML = html;

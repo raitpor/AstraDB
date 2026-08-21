@@ -21,7 +21,7 @@ AstraDB 是一套**定位清晰、完成度高的自研存储引擎**：以"周�
 | 并发模型 | 全局锁只管表集合；表级读写锁：同表写串行、查询与写并发、跨表写并行；锁序 global→table 防死锁 |
 | 崩溃安全 | points.dict 先落盘再写 chunk（孤儿点无害）、元数据临时文件 + rename、manifest 可重建 |
 | 模块边界 | core 零框架依赖、client 零第三方依赖（JDK HttpClient + 自含 JSON/二进制协议）、server 为薄编排层 |
-| 测试 | `mvn test` 实测 48 项全绿（core 25 + server 8 + client 15）；缺陷 D-01~D-09 全部关闭 |
+| 测试 | `mvn test` 实测 70 项全绿（core 41 + client 16 + server 13）；缺陷 D-01~D-12 全部关闭 |
 
 ### 1.2 值得肯定的设计点
 
@@ -48,7 +48,7 @@ AstraDB 是一套**定位清晰、完成度高的自研存储引擎**：以"周�
 - **预期收益**：跨段批量导入从"部分提交"变为"全有或全无"。
 - **涉及模块**：core · ingest/SnapshotIngestor、core · segment/SegmentWriter。
 - **验收标准**：注入崩溃点（kill -9）于批量导入中段，重启后要么全量可见、要么全量不可见（manifest 与磁盘一致）；既有批量导入测试（`ingestBatch` 90ms vs 224ms）不回归。
-- **实施情况**（2026-08-20 代码核查）：`SnapshotIngestor.writeSegmentsBatch` 已实现新段 staging——先写 `segments/.staging/*.tmp`，全部完成后 `Files.move(ATOMIC_MOVE)` 统一 rename 到正式路径 + manifest 一次保存；`P0ReliabilityTest.batchAtomicNewSegmentsAndStagingCleanup` 覆盖跨天两新段与 staging 残留启动清理，P0 测试 4 项全绿。
+- **实施情况**（2026-08-20 代码核查）：`SnapshotIngestor.writeSegmentsBatch` 已实现新段 staging——先写 `segments/.staging/*.tmp`，全部完成后 `Files.move(ATOMIC_MOVE)` 统一 rename 到正式路径 + manifest 一次保存；`P0ReliabilityTest.batchAtomicNewSegmentsAndStagingCleanup` 覆盖跨天两新段与 staging 残留启动清理，P0 测试 10 项全绿。
 - **遗留局限**：
   1. 仅"新段"走 staging；已有段 append 仍为直接追加（依赖崩溃截断兜底，单文件语义本就"全有或全无"），中间回填仍为整段重写（`SegmentRewriter` 的 tmp+rename）；
   2. rename 循环逐个执行，循环中途崩溃（微秒级窗口 × 段数）仍可能出现部分提交——语义收敛为**"近似原子"**（staging 全部 fsync 后 rename，窗口极小且实践可接受；多文件无原子 rename，不做严格两阶段）；
@@ -71,7 +71,7 @@ AstraDB 是一套**定位清晰、完成度高的自研存储引擎**：以"周�
 - **预期收益**：杜绝双写。
 - **涉及模块**：core · AstraDB.open。
 - **验收标准**：两进程同时 open 同一目录，第二个启动失败并给出明确错误；正常单进程启动/关闭无影响。
-- **实施情况**（2026-08-20 代码核查）：`AstraDB.open` 已对 `dataDir/.lock` 加 `FileChannel.tryLock()` 排他锁（含 `OverlappingFileLockException` 处理），失败抛"数据目录已被其他进程锁定"；`close()` 释放锁与句柄。`P0ReliabilityTest.dataDirLockRejectsSecondInstance` 覆盖（同 JVM 第二实例拒绝、close 后重开数据保留），P0 测试 4 项全绿。**无遗留问题**。
+- **实施情况**（2026-08-20 代码核查）：`AstraDB.open` 已对 `dataDir/.lock` 加 `FileChannel.tryLock()` 排他锁（含 `OverlappingFileLockException` 处理），失败抛"数据目录已被其他进程锁定"；`close()` 释放锁与句柄。`P0ReliabilityTest.dataDirLockRejectsSecondInstance` 覆盖（同 JVM 第二实例拒绝、close 后重开数据保留），P0 测试 10 项全绿。**无遗留问题**。
 
 ### 2.2 P1 · 内存与性能
 

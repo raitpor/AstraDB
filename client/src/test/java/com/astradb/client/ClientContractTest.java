@@ -120,6 +120,20 @@ class ClientContractTest {
     }
 
     @Test
+    void queryPointAtEscapesControlAndQuoteInKey() throws Exception {
+        route("/api/getPointSeries", ex -> {
+            String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            // SS-10：STRING 主键含换行/引号/反斜杠、表名含制表符 → JSON 字符串完整转义
+            // （修复前 escape() 只转义 \ 与 "，换行/制表符生成裸控制字符的非法 JSON）
+            assertTrue(body.contains("\"table\":\"t\\t1\""), "表名制表符应转义: " + body);
+            assertTrue(body.contains("\"key\":\"a\\nb\\\"c\\\\d\""), "key 换行/引号/反斜杠应转义: " + body);
+            json(ex, 200, "[{\"timestamp\":1000,\"values\":[1.0]}]");
+        });
+        Object[] r = new AstraDbClient(baseUrl).queryPointAt("t\t1", "a\nb\"c\\d", 1000L);
+        assertArrayEquals(new Object[]{1.0}, r);
+    }
+
+    @Test
     void basicAuthAndErrorMapping() throws Exception {
         route("/api/getTableInfo", ex -> {
             assertTrue(ex.getRequestHeaders().getFirst("Authorization").startsWith("Basic "));

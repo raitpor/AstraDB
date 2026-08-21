@@ -124,6 +124,11 @@ class ApiContractTest {
         mvc.perform(post("/api/createTable").contentType("application/json")
                         .content("{\"name\":\"../x\",\"primaryKey\":\"id\",\"columns\":[{\"name\":\"id\",\"type\":\"INT\"}]}"))
                 .andExpect(status().isBadRequest());
+        // SS-1：缺 columns 字段 → 400（而非 NPE → 500）
+        mvc.perform(post("/api/createTable").contentType("application/json")
+                        .content("{\"name\":\"noc\",\"primaryKey\":\"id\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_ARGUMENT"));
         // 主键非第一列
         mvc.perform(post("/api/createTable").contentType("application/json")
                         .content("{\"name\":\"pk\",\"primaryKey\":\"v\",\"columns\":[{\"name\":\"id\",\"type\":\"INT\"},{\"name\":\"v\",\"type\":\"INT\"}]}"))

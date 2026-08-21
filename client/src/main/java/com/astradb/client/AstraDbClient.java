@@ -60,7 +60,7 @@ public final class AstraDbClient {
             throw new ClientException("INVALID_ARGUMENT", "数据不能为空");
         }
         // 拉取 schema：校验列数/类型，取得列名（协议帧携带列名）
-        Node info = postJson("/api/getTableInfo", "{\"table\":\"" + escape(table) + "\"}");
+        Node info = postJson("/api/getTableInfo", "{\"table\":" + ClientJson.quote(table) + "}");
         Node colsNode = info.get("schema").get("columns");
         int schemaCols = colsNode.asArray().size();
         List<String> names = new ArrayList<>(schemaCols);
@@ -93,7 +93,7 @@ public final class AstraDbClient {
     /** 查询指定时间点全量快照：列名与数据行（行对齐列名，含主键列；null 值以 null 表示）。 */
     public QueryResult queryFullSnapshot(String table, long timestamp) {
         byte[] body = postJsonBinary("/api/queryFullSnapshotBinary",
-                ("{\"table\":\"" + escape(table) + "\",\"ts\":" + timestamp + "}")
+                ("{\"table\":" + ClientJson.quote(table) + ",\"ts\":" + timestamp + "}")
                         .getBytes(StandardCharsets.UTF_8));
         Frame frame;
         try {
@@ -131,8 +131,10 @@ public final class AstraDbClient {
      * 复用 getPointSeries（from=to=ts 精确匹配）。
      */
     public Object[] queryPointAt(String table, String key, long timestamp) {
-        String body = "{\"table\":\"" + escape(table) + "\",\"key\":\"" + escape(key)
-                + "\",\"from\":" + timestamp + ",\"to\":" + timestamp + ",\"limit\":1}";
+        // SS-10：JSON 字符串统一走 ClientJson.quote（含控制字符转义），
+        // 避免 STRING 主键含换行/制表符时生成裸控制字符的非法 JSON
+        String body = "{\"table\":" + ClientJson.quote(table) + ",\"key\":" + ClientJson.quote(key)
+                + ",\"from\":" + timestamp + ",\"to\":" + timestamp + ",\"limit\":1}";
         Node resp = postJson("/api/getPointSeries", body);
         List<Node> arr = resp.asArray();
         if (arr.isEmpty()) {
@@ -192,7 +194,7 @@ public final class AstraDbClient {
 
     /** 表信息（pointCount/segmentCount/totalRows/totalSizeBytes/schema 等）。 */
     public java.util.Map<String, Object> getTableInfo(String table) {
-        Node info = postJson("/api/getTableInfo", "{\"table\":\"" + escape(table) + "\"}");
+        Node info = postJson("/api/getTableInfo", "{\"table\":" + ClientJson.quote(table) + "}");
         java.util.Map<String, Object> out = new java.util.LinkedHashMap<>();
         for (String key : List.of("name", "pointCount", "segmentCount", "totalRows", "totalSizeBytes",
                 "retentionDays", "compressionLevel")) {
@@ -346,10 +348,6 @@ public final class AstraDbClient {
             case "DOUBLE" -> ColumnType.DOUBLE;
             default -> ColumnType.STRING;
         };
-    }
-
-    private static String escape(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     private static String encodeQuery(String s) {

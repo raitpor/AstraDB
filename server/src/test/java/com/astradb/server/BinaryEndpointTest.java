@@ -120,6 +120,26 @@ class BinaryEndpointTest {
                 .andExpect(jsonPath("$.code").value("INGEST_REJECTED"));
     }
 
+    @Test
+    void corruptVarintLenFrameRejectedAs400() throws Exception {
+        // 独立建表（方法执行顺序不确定，不依赖其他测试的表）
+        mvc.perform(post("/api/createTable").contentType("application/json").content(
+                "{\"name\":\"vn\",\"primaryKey\":\"id\",\"columns\":[{\"name\":\"id\",\"type\":\"INT\"}]}"))
+                .andExpect(status().isOk());
+        // SS-2：列名字符串长度 varint = 0xFFFFFFFF。旧实现 (int) 强转 -1 → NegativeArraySizeException
+        // → 500；修复后长度超限以受控 IOException 拒绝 → 400 INGEST_REJECTED。
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        bos.write(new byte[]{'A', 'S', 'D', 'B'});   // magic
+        bos.write(1);                                 // version
+        bos.write(0);                                 // flags
+        bos.write(new byte[]{1, 0});                  // columnCount=1
+        bos.write(new byte[]{(byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, 0x0F}); // 长度 varint
+        mvc.perform(post("/api/importBinary").param("table", "vn").param("timestamp", String.valueOf(T0 + 2000))
+                        .contentType("application/octet-stream").content(bos.toByteArray()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INGEST_REJECTED"));
+    }
+
     private static Object valueAt(Frame f, int col, int row) {
         ColumnDef def = f.columns().get(col);
         long[] bitmap = f.data().get(col).nullBitmap();

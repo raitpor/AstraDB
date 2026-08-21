@@ -38,7 +38,7 @@
 | 新增 `ReviewShouldFixTest` 7 项 | ✅ SF-1（deleteSnapshot/deleteSegment 后重放真正写入 + 重启后仍有效）、SF-2（混合批部分重放+部分新增）、SF-3（损坏段隔离后 open 成功、好段可查、隔离产物在 `.quarantine`）、SF-4（跨表写真正并行：small 完成时 big 未完成）、SF-6（手工构造占位记录，确认返回精确行数 2、newPoints=0） |
 | `IngestBackfillDeleteTest` 适配 | ✅ "与已有快照重复拒绝"断言拆分不同 ts：单条/批量导入失败会残留占位记录，之后同内容重试命中占位确认（ts 已提交→确认成功）为 SF-2/SF-6 预期新语义 |
 | core 全量 | ✅ 41 项（34 原 + 7 新）BUILD SUCCESS |
-| **全量 `mvn test`** | ✅ **63 项**（core 41 + client 15 + server 7）BUILD SUCCESS，0 失败 0 错误 |
+| **全量 `mvn test`** | ✅ **63 项**（core 41 + client 15 + server 7）BUILD SUCCESS，0 失败 0 错误（交付当日实测；R-02 交付后全量已至 **70 项**：core 41 + client 16 + server 13） |
 
 ## 4. 影响与边界
 

@@ -189,6 +189,17 @@ public final class ServerHarness {
         return http.send(b.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
     }
 
+    /** POST 原始字节（二进制端点测试：损坏帧等）。 */
+    public static HttpResponse<String> sendRaw(String path, byte[] body)
+            throws IOException, InterruptedException {
+        HttpRequest req = HttpRequest.newBuilder(URI.create(baseUrl() + path))
+                .timeout(Duration.ofSeconds(60))
+                .header("Content-Type", "application/octet-stream")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                .build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    }
+
     /** multipart/form-data 上传（importSnapshot：table/timestamp + file）。 */
     public static HttpResponse<String> multipart(String path, String table, String timestamp,
                                                  byte[] csv, String auth)

@@ -1025,8 +1025,10 @@ public final class AstraDB implements AutoCloseable {
             throw new IllegalArgumentException("非法表名（空或超长）");
         }
         for (char c : name.toCharArray()) {
-            if (c == '/' || c == '\\' || c < 0x20 || c == 0x7F) {
-                throw new IllegalArgumentException("非法表名（含路径分隔符或控制字符）: " + name);
+            // SS-4 纵深防御：除路径分隔符/控制字符外，禁 HTML/JS 注入面字符（' " < >）
+            if (c == '/' || c == '\\' || c == '\'' || c == '"' || c == '<' || c == '>'
+                    || c < 0x20 || c == 0x7F) {
+                throw new IllegalArgumentException("非法表名（含路径分隔符、控制字符或 HTML 特殊字符）: " + name);
             }
         }
     }

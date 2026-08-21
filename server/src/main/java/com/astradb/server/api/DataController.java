@@ -77,18 +77,16 @@ public class DataController {
         return service.db().listSnapshots(req.table());
     }
 
-    /** 异步导入：提交后立即返回 taskId，后台执行（大文件不阻塞请求）。 */
+    /** 异步导入：提交后立即返回 taskId，后台执行（SS-7：CSV 解析与落盘均在后台线程，
+     *  请求线程仅读取文件字节，大文件不阻塞 HTTP 请求）。 */
     @PostMapping("/importAsync")
     public Map<String, String> importAsync(
             @RequestParam("table") String table,
             @RequestParam(value = "timestamp", required = false) Long timestamp,
             @RequestParam("file") MultipartFile file) throws IOException {
-        com.astradb.core.meta.Schema schema = service.db().tableInfo(table).schema();
-        com.astradb.core.ingest.SnapshotData data;
-        try (InputStream in = file.getInputStream()) {
-            data = com.astradb.server.ingest.CsvParser.parse(in, schema, true);
-        }
-        String taskId = importTaskService.submit(table, timestamp, data);
+        service.db().tableInfo(table); // 表存在性前置校验（错误同步返回，而非后台失败）
+        byte[] csvBytes = file.getBytes();
+        String taskId = importTaskService.submit(table, timestamp, csvBytes);
         return Map.of("taskId", taskId);
     }
 

@@ -154,8 +154,8 @@
 
 | ID | 描述 | 影响 | 处置 | 状态 |
 |---|---|---|---|---|
-| K-01 | manifest 重建时段窗口 minKey/maxKey 使用保守值（1..pointCount） | 单点查询的段跳过效率下降（需解压更多候选段） | 已解决：`describeSegment` 重建时解码主键列首尾精确计算 minKey/maxKey；验证用例 `manifestRebuildPreciseWindow`（跨天两段场景，重建后段1 maxKey=100 而非当前 pointCount=150） | **已解决** |
-| K-02 | 跨表写入使用全局写锁串行 | 多表并发导入无法并行，吞吐受限 | 已解决：改为表级读写锁（同表写串行、查询与写并发、跨表写并行；锁序 global→table 防死锁，dropTable 等待在途写完成）；验证用例 `concurrentIngestDifferentTables`（并发 20 万行 + 小表，小表先完成 369ms = 并行） | **已解决** |
+| K-01 | manifest 重建时段窗口 minKey/maxKey 使用保守值（1..pointCount） | 单点查询的段跳过效率下降（需解压更多候选段） | 已解决：`describeSegment` 重建时解码主键列首尾精确计算 minKey/maxKey；验证用例 `StorageLifecycleTest.manifestRebuildAfterDeletionAndDrift`（跨天两段场景，重建后段1 maxKey=100 而非当前 pointCount=150） | **已解决** |
+| K-02 | 跨表写入使用全局写锁串行 | 多表并发导入无法并行，吞吐受限 | 已解决：改为表级读写锁（同表写串行、查询与写并发、跨表写并行；锁序 global→table 防死锁，dropTable 等待在途写完成）；验证用例 `ConcurrencyTest.crossTableWritesAreParallel`（并发 20 万行 + 小表，小表先完成 369ms = 并行） | **已解决** |
 | K-03 | 管理页面浏览器交互（U-02）未人工执行 | UI 交互层可用性未完全确认 | 已解决：真实使用中验证导入/浏览/搜索/删除等交互，并触发修复 D-02/D-03 | **已解决** |
 | K-04 | 百万行级数据规模未实测 | 场景假设 N=20 万~百万的扩展性未验证 | 已解决：百万行压测（PerfBenchmarkTest.millionRowsBenchmark）——100 万点写入 1485ms、全量读取 2558ms、压缩率 10170x（重复模式理想值）、JVM 已用内存约 569MB（含测试堆） | **已解决** |
 

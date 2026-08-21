@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | [`design/`](./design/) | **设计类文档（主要编写区）** | 场景、总体设计、客户端设计、优化提案 |
 | [`review/`](./review/) | 评审报告 | 总体现状评价与 P0 专项评审（review-p0.md） |
-| [`phaseReport/`](./phaseReport/) | 阶段交付报告 | 阶段交付核对报告（phase-report.md） |
+| [`phaseReport/`](./phaseReport/) | 阶段交付报告 | 阶段核对报告（phase-report.md）+ 修复交付（R-01/R-02/D-12） |
 | [`test/`](./test/) | 测试文档 | 测试计划/用例/报告、缺陷跟踪（defects.md） |
 
 ## design/ 文件清单

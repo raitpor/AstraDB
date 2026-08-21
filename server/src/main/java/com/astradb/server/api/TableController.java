@@ -44,6 +44,10 @@ public class TableController {
 
     @PostMapping("/createTable")
     public AstraDB.TableInfo createTable(@RequestBody CreateTableRequest req) throws IOException {
+        if (req.columns() == null || req.columns().isEmpty()) {
+            // SS-1：缺 columns 字段 → 400（而非 NPE → 500）
+            throw new IllegalArgumentException("列定义不能为空（需提供 columns 字段）");
+        }
         List<Schema.ColumnDef> defs = req.columns().stream()
                 .map(c -> new Schema.ColumnDef(c.name(), c.type(), Boolean.TRUE.equals(c.nullable())))
                 .toList();

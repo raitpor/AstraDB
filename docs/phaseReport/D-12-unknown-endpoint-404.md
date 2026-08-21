@@ -41,7 +41,7 @@ public ResponseEntity<ApiError> methodNotAllowed(HttpRequestMethodNotSupportedEx
 |---|---|
 | 黑盒用例 `avUnknownEndpoint404`（解除 @Disabled 启用） | ✅ `POST /api/notExistEndpoint` 返回 **404**（含结构化错误体 NOT_FOUND） |
 | 黑盒全量 24 项（Availability/Integrity/Security） | ✅ BUILD SUCCESS（0 失败 0 错误） |
-| server 集成全量（core+client+server） | ✅ 56 项 BUILD SUCCESS |
+| server 集成全量（core+client+server） | ✅ 56 项 BUILD SUCCESS（交付当日实测；R-01/R-02 交付后全量已至 **70 项**） |
 
 ## 4. 影响与边界
 

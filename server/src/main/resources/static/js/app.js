@@ -1,5 +1,28 @@
 // AstraDB 管理台公共 JS
 
+// SS-4：HTML 转义（文本插值与 data-* 属性统一走本函数，防存储型 XSS：
+// 表名/列名/STRING 数据值经 innerHTML 渲染时不再可注入标签或属性）
+function esc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// SS-4：删除/查看等操作的 onclick 内联字符串参数易被引号注入，改为 data-act + 事件委托，
+// 参数经 data-*（HTML 实体转义）传递，读取时浏览器自动解码为原始值
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    if (act === 'dropTable') dropTable(btn.dataset.name);
+    else if (act === 'showSegment') showSegmentSnapshots(btn.dataset.path);
+    else if (act === 'deleteSegment') deleteSegmentFile(btn.dataset.path);
+    else if (act === 'deleteSnapshot') deleteSnapshotAt(Number(btn.dataset.ts), btn.dataset.path);
+});
+
 async function api(path, body) {
     const resp = await fetch(path, {
         method: 'POST',
@@ -47,10 +70,11 @@ async function loadTables() {
     for (const name of names) {
         const st = await api('/api/getTableStats', {table: name});
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td><a href="/table?name=${encodeURIComponent(name)}">${name}</a></td>
+        // SS-4：name 经 esc 转义（文本 + data-name 属性），删除按钮走事件委托
+        tr.innerHTML = `<td><a href="/table?name=${encodeURIComponent(name)}">${esc(name)}</a></td>
             <td>${st.pointCount}</td><td>${st.segmentCount}</td><td>${st.totalRows}</td>
             <td>${fmtBytes(st.totalSizeBytes)}</td>
-            <td><button class="danger" onclick="dropTable('${name}')">删除</button></td>`;
+            <td><button class="danger" data-act="dropTable" data-name="${esc(name)}">删除</button></td>`;
         tbody.appendChild(tr);
     }
 }

@@ -29,7 +29,7 @@ public class HealthController {
                 "status", "UP",
                 "version", AstraDB.VERSION,
                 "tables", service.db().listTables().size(),
-                "dataDir", dir.toString(),
+                // SS-8：不返回 dataDir 绝对路径（未认证可访问，防泄露文件系统布局），仅暴露可写状态
                 "dataDirWritable", Files.isWritable(dir),
                 "uptimeMs", System.currentTimeMillis() - service.startedAtMillis());
     }

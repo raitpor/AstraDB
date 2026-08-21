@@ -7,7 +7,7 @@
 
 依据 design.md / scenario.md / client-design.md 对 AstraDB 全链条（core + server + client + 二进制协议）执行功能、性能、安全三类测试。
 
-**执行方式**：测试源码已恢复入库（core/client/server 的 src/test 共 **16 个测试类 / 56 项**，2026-08-20 全量 `mvn test` 实测全绿）；v1.0 的端到端基线（server jar + curl + client 程序 + 性能计时 + 安全专项）保留于第 2~4 节。
+**执行方式**：测试源码已恢复入库（core/client/server 的 src/test 共 **17 个测试类 / 70 项**，2026-08-21 全量 `mvn test` 实测全绿）；v1.0 的端到端基线（server jar + curl + client 程序 + 性能计时 + 安全专项）保留于第 2~4 节。
 
 ## 2. 功能测试结果（F1~F9，29 项用例）
 
@@ -60,7 +60,7 @@
 
 | 项 | 说明 |
 |---|---|
-| 测试源码入库 | 16 类 56 项已恢复在库（git 待提交），建议纳入版本控制后补 CI |
+| 测试源码入库 | 17 类 70 项已入库（core 41 + client 16 + server 13；另有 1 项 perf `AslpvConsistencyIT` 默认不执行），建议纳入 CI |
 | Docker 未测 | 环境无 docker（既有指示） |
 | 浏览器交互 | 以 curl + 静态核对覆盖；异步导入轮询/段弹窗等交互建议人工补验 |
 | 表单登录 CSRF | 验证通过（含 CSRF token 流程） |

@@ -2,7 +2,7 @@
 
 > 版本：v2.0 · 日期：2026-08-20 · 关联：[chain-test-plan.md](./chain-test-plan.md)、[design.md](../design/design.md)、[scenario.md](../design/scenario.md)、[client-design.md](../design/client-design.md)、[optimization.md](../design/optimization.md)、[review-p0.md](../review/review-p0.md)
 > 类型：A=既有自动化映射（类.方法），E=新增端到端/真实服务器，M=手工
-> 说明：F/P/S 各表"基线已归档"执行结果基于**归档前 118 项**测试资产（旧测试类已移除）；当前仓库可执行资产为 **16 个测试类 / 56 项**（2026-08-20 实测全绿），F/P/S 域在当前资产上的映射见文末 **R 可靠性专项** 与 [chain-test-report.md](./chain-test-report.md)。
+> 说明：F/P/S 各表"基线已归档"执行结果基于**归档前 118 项**测试资产（旧测试类已移除）；当前仓库可执行资产为 **17 个测试类 / 70 项**（2026-08-21 实测全绿；另含 1 项 perf 标注 `AslpvConsistencyIT` 默认不执行），F/P/S 域在当前资产上的映射见文末 **R 可靠性专项** 与 [chain-test-report.md](./chain-test-report.md)。
 
 ## F 功能（design 全部功能域 + client-design）
 
@@ -99,7 +99,7 @@
 
 ## R 可靠性专项（P0，2026-08-20 追加）
 
-> 依据：`optimization.md` §2.1（O-01/O-02/O-03）+ `review-p0.md` §4（B-1/B-2/S-1/S-2/S-3/O-2）。执行资产：`core/src/test/.../P0ReliabilityTest`（10 项）。执行结果回填自 2026-08-20 `mvn test -pl core -Dtest=P0ReliabilityTest` 实测（10/10 全绿）与全量 56 项回归。
+> 依据：`optimization.md` §2.1（O-01/O-02/O-03）+ `review-p0.md` §4（B-1/B-2/S-1/S-2/S-3/O-2）。执行资产：`core/src/test/.../P0ReliabilityTest`（10 项）。执行结果回填自 2026-08-20 `mvn test -pl core -Dtest=P0ReliabilityTest` 实测（10/10 全绿）与全量 70 项回归（2026-08-21）。
 
 | ID | 用例 | 优先级 | 类型 | 验证方式 | 预期结果 | 执行结果 | 状态 |
 |---|---|---|---|---|---|---|---|
@@ -114,11 +114,11 @@
 | RT-R4-02 | B-2 回归：STRING 内容哈希可区分 `String.hashCode` 冲突对 | P0 | A | `P0ReliabilityTest.stringHashDistinguishesHashCodeCollisions` | 冲突对（同 hashCode 不同内容）哈希不同 | 通过 | 通过 |
 | RT-R4-03 | S-1 回归：open 加载失败释放锁、同 JVM 重试成功 | P0 | A | `P0ReliabilityTest.openFailureReleasesLockAndRetrySucceeds` | 失败后重试 open 成功 | 通过 | 通过 |
 
-## 当前测试资产与用例映射附注（2026-08-20）
+## 当前测试资产与用例映射附注（2026-08-21）
 
 | 模块 | 测试类 | 说明 |
 |---|---|---|
-| core（8 类） | `ConcurrencyTest` / `EncodingPropertyTest` / `IngestBackfillDeleteTest` / `P0ReliabilityTest` / `QuerySemanticsTest` / `ScenarioBasedTest` / `StorageFormatTest` / `StorageLifecycleTest` | 编码属性、生命周期、导入回填删除、并发、查询语义、场景、存储格式、崩溃恢复、P0 可靠性（10 项） |
+| core（9 类） | `ConcurrencyTest` / `EncodingPropertyTest` / `IngestBackfillDeleteTest` / `P0ReliabilityTest` / `QuerySemanticsTest` / `ReviewShouldFixTest` / `ScenarioBasedTest` / `StorageFormatTest` / `StorageLifecycleTest` | 编码属性、生命周期、导入回填删除、并发、查询语义、场景、存储格式、崩溃恢复、P0 可靠性（10 项）、review should-fix（SF-1~SF-8，7 项） |
 | client（3 类） | `ClientContractTest` / `ClientJsonTest` / `protocol.BinaryProtocolPropertyTest` | 契约、自含 JSON、二进制协议属性 |
-| server（4 类） | `ApiContractTest` / `AslpvConsistencyIT` / `BinaryEndpointTest` / `SecurityContractTest` | API 契约、ASLPV 一致性（@Tag perf）、二进制端点、安全 |
-| 合计 | 16 类 / 56 项（2026-08-20 `mvn test` 实测全绿） | `AslpvConsistencyIT` 标注 perf，默认 profile 不执行 |
+| server（6 类） | `ApiContractTest` / `AslpvConsistencyIT` / `BinaryEndpointTest` / `CsvParserTest` / `SecurityContractTest` / `UploadLimitTest` | API 契约、ASLPV 一致性（@Tag perf）、二进制端点、CSV 解析、安全、上传超限 413 |
+| 合计 | 18 类 / 71 项 `@Test`（2026-08-21 `mvn test` 实测 **17 类 / 70 项**全绿） | `AslpvConsistencyIT` 标注 perf，默认 profile 不执行 |

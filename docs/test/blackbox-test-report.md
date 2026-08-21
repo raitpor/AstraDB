@@ -1,9 +1,9 @@
 # AstraDB 黑盒测试报告
 
-> 版本：v1.2 · 日期：2026-08-21 · 状态：**通过（缺陷全部关闭）**
+> 版本：v1.3 · 日期：2026-08-21 · 状态：**通过（缺陷全部关闭）**
 > 关联：[scenario.md](../design/scenario.md)（场景）、[design.md](../design/design.md)（设计）、[defects.md](./defects.md)（缺陷跟踪）
 > 执行方式：根目录 `test/` 独立测试工程（不挂主构建，**未改动任何非测试代码**），真实启动 server jar + HTTP API 黑盒验证
-> 变更：v1.1 追加第 8 节"定时导入长测"；v1.2 追加第 9 节"最新交付可用性测试"（R-01 SF-1~SF-8 + D-12），D-12 关闭
+> 变更：v1.1 追加第 8 节"定时导入长测"；v1.2 追加第 9 节"最新交付可用性测试"（R-01 + D-12）；v1.3 追加第 10 节"R-02 server/client should-fix 测试"
 
 ---
 
@@ -131,3 +131,26 @@
 ### 8.3 结论
 
 **定时导入长测通过**：压缩等级 20 的表在"每 1 分钟 client 导入 1000 条 ×10"负载下，10 个快照全部可查、全量与单点数据正确（含值随批次变化的跨快照区分验证）；spring 定时任务与 client 二进制导入链路稳定，**未发现新缺陷**。
+
+## 10. R-02 server/client should-fix 测试（SS-1~SS-10，2026-08-21 追加）
+
+> 针对交付文档：[R-02 修复交付](../phaseReport/R-02-review-server-shouldfix.md)（review.md 5.1 SS-1~SS-10）。
+> 测试代码：`test/src/test/java/com/astradb/blackbox/LatestServerDeliveryTest.java`（8 项，黑盒：HTTP + client SDK）。
+> 执行结果：`mvn -f test/pom.xml test -Dtest=LatestServerDeliveryTest` → **Tests run: 8, Failures: 0, Errors: 0**；黑盒全量 39 项 BUILD SUCCESS。
+
+| ID | 用例 | 验证的交付 | 结果 |
+|---|---|---|---|
+| RS-01 | createTable 缺 `columns` → 400 `INVALID_ARGUMENT`（原 500 NPE） | SS-1 | ✅ 通过 |
+| RS-02 | 损坏二进制帧 → 400 `INGEST_REJECTED`（原 500 `NegativeArraySizeException`） | SS-2 | ✅ 通过 |
+| RS-03 | health 不再泄露 `dataDir`（仅保留 `dataDirWritable` 布尔） | SS-8 | ✅ 通过 |
+| RS-04 | 表名含 `' " < >` → 400 拒绝（XSS 纵深防御） | SS-4 | ✅ 通过 |
+| RS-05 | CSV 未闭合引号 → 400 格式错误且不产生数据（原静默吞行） | SS-5 | ✅ 通过 |
+| RS-06 | importAsync 坏 CSV：请求 200 返回 taskId，解析错误进任务状态 FAILED（解析移后台） | SS-7 | ✅ 通过 |
+| RS-07 | client 含引号/换行/制表符 key 的 JSON 转义 → 导入成功且单点可查 | SS-10 | ✅ 通过 |
+| RS-08 | 常规回归：健康/建表/导入/查询全流程 | 回归 | ✅ 通过 |
+
+> 说明：SS-3（BCrypt 密码）行为由既有 `SecurityTest`（鉴权 401/200）覆盖；SS-6（异步队列有界/不裁剪 RUNNING）、SS-9（上传超限 413，需 >200MB 文件）为单测覆盖（`ImportTaskService`/`UploadLimitTest`），黑盒不可低成本构造，本报告不再重复。
+
+### 结论
+
+**R-02 server/client should-fix 交付验证通过**：SS-1/SS-2/SS-4/SS-5/SS-7/SS-8/SS-10 经黑盒验证全部生效（错误语义 400 化、信息泄露消除、XSS 纵深防御、CSV 格式校验、异步解析后台化、client JSON 转义完整），无回归；黑盒全量 39 项 0 失败 0 错误，**未发现新缺陷**。

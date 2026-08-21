@@ -27,8 +27,9 @@ public final class BinaryIngestParser {
         Frame frame;
         try {
             frame = BinaryProtocol.decode(in);
-        } catch (IOException e) {
-            // 客户端二进制数据格式错误 → 400（而非 500 存储错误）
+        } catch (IOException | RuntimeException e) {
+            // SS-2：损坏/恶意帧（含 varint 溢出、长度非法、越界等运行时异常）
+            // → 400（而非穿透为 500 存储错误）
             throw new SnapshotIngestor.IngestException("二进制数据解析失败: " + e.getMessage());
         }
         int cols = schema.columnCount();

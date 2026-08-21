@@ -31,6 +31,7 @@ public class ApiExceptionHandler {
     public static final String CODE_INTERNAL_ERROR = "INTERNAL_ERROR";
     public static final String CODE_NOT_FOUND = "NOT_FOUND";
     public static final String CODE_METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED";
+    public static final String CODE_PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE";
 
     public record ApiError(String code, String message, long timestamp, String path) {
         static ApiError of(String code, String message, HttpServletRequest req) {
@@ -70,6 +71,15 @@ public class ApiExceptionHandler {
     public ResponseEntity<ApiError> methodNotAllowed(HttpRequestMethodNotSupportedException e, HttpServletRequest req) {
         return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
                 .body(ApiError.of(CODE_METHOD_NOT_ALLOWED, "方法不支持: " + e.getMessage(), req));
+    }
+
+    /** SS-9：上传超过 spring.servlet.multipart 限制 → 413（而非落入全局 500 兜底）。 */
+    @ExceptionHandler(org.springframework.web.multipart.MaxUploadSizeExceededException.class)
+    public ResponseEntity<ApiError> uploadTooLarge(org.springframework.web.multipart.MaxUploadSizeExceededException e,
+                                                   HttpServletRequest req) {
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+                .body(ApiError.of(CODE_PAYLOAD_TOO_LARGE,
+                        "上传文件超过大小限制（上限 " + e.getMaxUploadSize() + " 字节）", req));
     }
 
     @ExceptionHandler(IOException.class)

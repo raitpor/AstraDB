@@ -185,7 +185,7 @@ curl -X POST $BASE/api/getPointSeries -H 'Content-Type: application/json' \
 ## 测试
 
 ```bash
-mvn test    # 40 项自动化测试（core 24 + client 9 + server 7），场景驱动/属性/契约组织（编码属性/生命周期/导入回填删除/并发/二进制协议/API/安全）
+mvn test    # 70 项自动化测试（core 41 + client 16 + server 13），场景驱动/属性/契约组织（编码属性/生命周期/导入回填删除/并发/二进制协议/API/安全）
 ```
 
 测试计划与用例、历史报告已归档；缺陷跟踪见 [docs/test/defects.md](docs/test/defects.md)（D-01~D-09 全部关闭）。

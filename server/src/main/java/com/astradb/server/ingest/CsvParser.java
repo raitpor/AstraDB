@@ -49,6 +49,11 @@ public final class CsvParser {
                 if (ch == '"') {
                     afterQuote = true;
                     inQuotes = false;
+                } else if (ch == '\n' || ch == '\r') {
+                    // SS-5：引号内出现换行 = 未闭合引号。本项目不支持跨行字段，
+                    // 报格式错误而非把后续行并入同一字段（列数恰好匹配时静默导入错误数据）
+                    throw new SnapshotIngestor.IngestException(
+                            "CSV 引号未闭合（第 " + (rowNum + 1) + " 行）");
                 } else {
                     cur.append(ch);
                 }
@@ -99,6 +104,10 @@ public final class CsvParser {
             }
         }
         // 最后一行无换行符
+        if (inQuotes) {
+            // SS-5：文件在引号内结束 = 未闭合引号，报格式错误
+            throw new SnapshotIngestor.IngestException("CSV 引号未闭合（文件结尾）");
+        }
         if (rowStart && cur.isEmpty() && fields.isEmpty()) {
             // 空尾行
         } else {

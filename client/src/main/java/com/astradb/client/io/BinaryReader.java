@@ -10,6 +10,9 @@ import java.nio.charset.StandardCharsets;
  */
 public final class BinaryReader {
 
+    /** 单字符串长度上限（64MB；SS-2/SO-4：防恶意帧超大分配，负数 varint 强转 int 变负/超大 → 拒收）。 */
+    private static final long MAX_STRING_BYTES = 1L << 26;
+
     private final InputStream in;
 
     public BinaryReader(InputStream in) {
@@ -58,7 +61,13 @@ public final class BinaryReader {
     }
 
     public String readString() throws IOException {
-        int len = (int) readVarInt();
+        long lenL = readVarInt();
+        // SS-2：varint 为无符号（0..2^63-1），强转 int 可为负 → NegativeArraySizeException；
+        // 统一校验长度区间，非法帧以受控 IOException 拒绝（上层映射 400）
+        if (lenL < 0 || lenL > MAX_STRING_BYTES) {
+            throw new IOException("字符串长度非法（超上限）: " + lenL);
+        }
+        int len = (int) lenL; // 已校验 ≤ 64MB，收窄安全
         byte[] buf = new byte[len];
         int off = 0;
         while (off < len) {

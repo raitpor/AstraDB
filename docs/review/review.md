@@ -1,9 +1,9 @@
 # AstraDB 全项目评审报告
 
-> 版本：v1.1（复审）· 日期：2026-08-21 · 状态：正式
-> 评审历程：v1.0（2026-08-20 初评，无 blocking / 8+10 项 should-fix）→ **v1.1（2026-08-21 复审：core should-fix 全部修复、D-12 修复关闭，本版）**
-> 评审基准：工作区 HEAD + 未提交的修复（R-01：SF-1~SF-8；D-12：404/405 错误语义）
-> 关联文档：[review-p0.md](./review-p0.md)（P0 专项评审）、[optimization.md](../design/optimization.md)（优化提案）、[design.md](../design/design.md)（设计）、[R-01 修复交付](../phaseReport/R-01-review-shouldfix.md)、[D-12 修复交付](../phaseReport/D-12-unknown-endpoint-404.md)、[blackbox-test-report.md](../test/blackbox-test-report.md)（黑盒测试）、[defects.md](../test/defects.md)（缺陷跟踪）
+> 版本：v1.2（复审）· 日期：2026-08-21 · 状态：正式
+> 评审历程：v1.0（2026-08-20 初评，无 blocking / 8+10 项 should-fix）→ v1.1（2026-08-21：R-01 修复 core SF-1~SF-8、D-12 关闭）→ **v1.2（2026-08-21：R-02 修复 server/client SS-1~SS-10，should-fix 全部清零，本版）**
+> 评审基准：工作区 HEAD + 未提交的修复（R-01：SF-1~SF-8；R-02：SS-1~SS-10；D-12：404/405 错误语义）
+> 关联文档：[review-p0.md](./review-p0.md)（P0 专项评审）、[optimization.md](../design/optimization.md)（优化提案）、[design.md](../design/design.md)（设计）、[R-01 修复交付](../phaseReport/R-01-review-shouldfix.md)、[R-02 修复交付](../phaseReport/R-02-review-server-shouldfix.md)、[D-12 修复交付](../phaseReport/D-12-unknown-endpoint-404.md)、[blackbox-test-report.md](../test/blackbox-test-report.md)（黑盒测试）、[defects.md](../test/defects.md)（缺陷跟踪）
 
 ---
 
@@ -13,26 +13,28 @@
 |---|---|
 | 代码 | `core/`（存储/编码/压缩/段/点字典/导入/查询/保留期）、`server/`（API/安全/异步导入/UI）、`client/`（二进制协议 + 自含 JSON）、`test/`（黑盒测试工程） |
 | 文档对照 | design.md、optimization.md、chain-test-*、blackbox-test-report.md、defects.md、R-01/D-12 交付报告 |
-| 实测（v1.1） | `mvn test`：**BUILD SUCCESS，63 项全绿**（core 41 + client 15 + server 7）；黑盒工程 31 项 BUILD SUCCESS |
+| 实测（v1.2） | `mvn test`：**BUILD SUCCESS，70 项全绿**（core 41 + client 16 + server 13）；黑盒工程 31 项 BUILD SUCCESS |
 | 原则 | 只读评审，不修改任何 Java 代码；结论均附 file:line 证据 |
 
-## 2. 总体结论（v1.1 复审）
+## 2. 总体结论（v1.2 复审）
 
-**verdict: 有条件放行（较 v1.0 显著收敛）** —— 无 **blocking**；v1.0 报告的 **core 8 项 should-fix（SF-1~SF-8）已全部修复并验证**（R-01 交付：`ReviewShouldFixTest` 7 项 + core 41 项 + 全量 63 项 + 黑盒 LD-01~LD-07 验证）；黑盒测试发现的 **D-12（未知端点 404）已修复关闭**。缺陷全部清零（D-01~D-12 关闭，K-01~K-04 解决）。
+**verdict: 放行（should-fix 全部清零）** —— 无 **blocking**；v1.0 报告的 **8（core）+ 10（server/client）项 should-fix 已全部修复并验证**：R-01 交付 SF-1~SF-8（`ReviewShouldFixTest` 7 项 + 黑盒 LD-03~LD-06）、R-02 交付 SS-1~SS-10（server/client 新增回归 14 项 + 全量 70 项）；黑盒发现的 D-12（未知端点 404）已修复关闭。缺陷全部清零（D-01~D-12 关闭，K-01~K-04 解决）。
 
-**v1.1 已解决**：
+**v1.1 已解决（R-01）**：
 1. ~~SF-1 幂等记录不随删除清理（静默丢数据方向）~~ → `removeIdem` + `rewriteIdemExcluding`（临时文件 + fsync + ATOMIC_MOVE + 目录 fsync），删除/保留期清理同步枚举段内 ts；
 2. ~~SF-3 损坏段使整个库无法 open~~ → 启动隔离至 `segments/.quarantine/*.corrupt` + WARN + manifest 剔除，好数据可用（黑盒 LD-03 验证）；
 3. ~~SF-4 全局幂等锁串行化跨表导入~~ → 幂等 map/锁按表拆分（`TableState.idemLock`），跨表导入恢复并行（黑盒 LD-06 验证）；
 4. ~~D-12 未知端点 500~~ → `NoResourceFoundException`→404、`HttpRequestMethodNotSupportedException`→405（黑盒 LD-01/LD-02 验证）。
 
-**剩余主要风险（v1.1，均属 server/client，留待后续迭代）**：
-1. **SS-4 管理台存储型 XSS**（表名/数据进 innerHTML）；
-2. **SS-3 `{noop}` 明文弱口令**（默认 `admin123`）；
-3. **SS-5 CSV 未闭合引号吞行 → 静默错数据**；
-4. 其余 SS-1/SS-2/SS-6~SS-10（客户端错误 500 映射、任务队列、client escape 等）。
+**v1.2 已解决（R-02）**：
+1. ~~SS-3 `{noop}` 明文弱口令~~ → 移除 `{noop}`，DelegatingPasswordEncoder（默认 BCrypt）编码存储；默认口令启动 WARN 告警；
+2. ~~SS-4 管理台存储型 XSS~~ → `app.js`/`table.html` 统一 `esc()` HTML 实体转义 + `data-act` 事件委托（消除 onclick 内联注入面）+ `validateName` 禁 `' " < >` 纵深防御；
+3. ~~SS-5 CSV 未闭合引号吞行~~ → 引号内遇换行/EOF 报 `IngestException`（RFC 4180 格式错误）；
+4. ~~SS-1/SS-2/SS-6~SS-10~~ → createTable 缺 columns 400、二进制帧长度校验（≤64MB）+ RuntimeException→400、异步队列有界（100）+ trim 不裁剪 RUNNING + `@PreDestroy`、importAsync 解析移入后台线程、health 脱敏（仅 `dataDirWritable`）、上传超限 413、client JSON 拼接改用 `ClientJson.quote`。
 
-**亮点（v1.0 确认，复审未发现回退）**：锁序一致无死锁；`contentHash64` 64 位 FNV-1a（STRING 逐 char）；dataDir 锁异常路径释放；幂等批内合并 fsync；预写占位幂等；错误码映射与路径安全；二进制协议自洽；UI 模板转义。
+**剩余（观察项为主，无 should-fix）**：core 观察项 O-1~O-16 与 server/client 观察项 SO-1~SO-13 中，除 SO-4（随 SS-2 修复）、SO-7 部分（随 SS-5）外均为低风险工程卫生项，详见第 4.2 / 5.2 节。
+
+**亮点（v1.0 确认，两轮复审未发现回退）**：锁序一致无死锁；`contentHash64` 64 位 FNV-1a（STRING 逐 char）；dataDir 锁异常路径释放；幂等批内合并 fsync；预写占位幂等；错误码映射（400/404/405/413）与路径安全；二进制协议自洽；UI 模板转义。
 
 ## 3. 已验证正确项
 
@@ -88,21 +90,21 @@
 
 ## 5. server / client 问题清单
 
-### 5.1 should-fix（v1.0 清单 SS-1~SS-10：**未修复，留待后续迭代**；新增 SS-11 已修复）
+### 5.1 should-fix（v1.0 清单 SS-1~SS-11：**v1.2 全部已修复**，交付见 [R-02](../phaseReport/R-02-review-server-shouldfix.md)、SS-11 见 [D-12](../phaseReport/D-12-unknown-endpoint-404.md)）
 
-| ID | 问题 | 位置 | 影响 / 建议 | 状态 |
+| ID | 问题（v1.0 描述） | 修复方案（R-02） | 验证 | 状态 |
 |---|---|---|---|---|
-| SS-1 | **createTable 缺 `columns` 字段 → NPE → 500** | `TableController.java:47` | 客户端参数缺失应为 400；判空抛 `IllegalArgumentException` | 未修 |
-| SS-2 | **二进制协议解码 RuntimeException → 500** | `BinaryIngestParser.java:28-33`、`BinaryReader.java:61` | 恶意/损坏帧穿透为 500；校验长度并映射 400 | 未修 |
-| SS-3 | **密码 `{noop}` 明文 + 默认弱口令 `admin123`** | `SecurityConfig.java:42,44`、`application.yml:17` | 开启鉴权后仍可被默认口令全权操作（对应 G-10/O-14）；建议 BCrypt + 强制改密 | **未修（P0 候选）** |
-| SS-4 | **管理台存储型 XSS** | `app.js:50-53`、`table.html:231-234` | 表名含 `'` 可注入 JS；STRING 列值可为 `<img onerror=...>`；innerHTML 路径统一转义 + validateName 限制特殊字符 | **未修（P0 候选）** |
-| SS-5 | **CSV 未闭合引号吞行 → 静默错数据** | `CsvParser.java:48-55,92-94` | 未闭合引号把后续行并入同一字段，列数恰好匹配时不报错；RFC 4180 应报格式错误 | **未修（P0 候选）** |
-| SS-6 | **ImportTaskService 无界队列 + trim 可能删除 RUNNING + 无关闭钩子** | `ImportTaskService.java:34-40,74-83` | 大文件任务内存无限堆积；RUNNING 被 trim 后状态查询失败；有界队列 + trim 排除 RUNNING + `@PreDestroy` | 未修 |
-| SS-7 | **importAsync"大文件不阻塞请求"与实现不符** | `DataController.java:80-91` | 解析仍在请求线程同步完成；注释/实现二选一对齐 | 未修 |
-| SS-8 | **HealthController 未认证泄露 dataDir 绝对路径** | `HealthController.java:32`、`SecurityConfig.java:32` | 未认证者可获服务器文件系统布局；脱敏或鉴权 | 未修 |
-| SS-9 | **上传超限异常未映射为 4xx** | `application.yml:24-26`、`ApiExceptionHandler` | 超限上传落入默认 500；映射 413/400 | 未修 |
-| SS-10 | **client `escape()` 不完整 → 控制字符 key 生成非法 JSON** | `AstraDbClient.java:351-353,134-135` | STRING 主键含换行/制表符时产生裸控制字符；改用 `ClientJson.quote` | 未修 |
-| SS-11 | **未知 API 端点返回 500 而非 404**（黑盒 AV-04 发现，D-12） | `ApiExceptionHandler` 全局 `Exception` 兜底吞掉 `NoResourceFoundException` | 未知端点 404 会被监控误判为服务故障；`NoResourceFoundException`→404 NOT_FOUND、`HttpRequestMethodNotSupportedException`→405 METHOD_NOT_ALLOWED，错误体结构化 | ✅ 已修复（D-12 交付，黑盒 LD-01/LD-02 验证） |
+| SS-1 | **createTable 缺 `columns` 字段 → NPE → 500** | `columns` 为空抛 `IllegalArgumentException` → 400 INVALID_ARGUMENT | `ApiContractTest` 新增断言 | ✅ 已修复 |
+| SS-2 | **二进制协议解码 RuntimeException → 500**（含恶意帧 OOM 面） | `readString` 校验 varint 长度区间（≤64MB，防负数/超大分配）；`BinaryIngestParser` catch RuntimeException → 400 INGEST_REJECTED | `BinaryEndpointTest` 新增 varint 0xFFFFFFFF 帧断言 | ✅ 已修复 |
+| SS-3 | **密码 `{noop}` 明文 + 默认弱口令 `admin123`** | 移除 `{noop}`，DelegatingPasswordEncoder（默认 BCrypt）编码存储；配置值带 `{prefix}` 原样使用；默认口令启动 WARN 告警 | `SecurityContractTest` BCrypt 登录回归 | ✅ 已修复 |
+| SS-4 | **管理台存储型 XSS**（表名/数据进 innerHTML） | `app.js`/`table.html` 统一 `esc()`（`& < > " '`）转义；删除类操作改 `data-act` + 事件委托（消除 onclick 内联注入面）；`validateName` 禁 `' " < >` 纵深防御 | 前端渲染回归 | ✅ 已修复 |
+| SS-5 | **CSV 未闭合引号吞行 → 静默错数据** | 引号内遇 `\n`/`\r` 或 EOF 报 `IngestException`（RFC 4180 格式错误） | `CsvParserTest`（新建 4 项） | ✅ 已修复 |
+| SS-6 | **ImportTaskService 无界队列 + trim 可能删除 RUNNING + 无关闭钩子** | `ThreadPoolExecutor` + `ArrayBlockingQueue(100)` 有界，满则 400；trim 只清理已结束任务；新增 `@PreDestroy` 优雅停池 | `batchAndAsyncImport` 回归 | ✅ 已修复 |
+| SS-7 | **importAsync"大文件不阻塞请求"与实现不符** | CSV 解析移入后台线程（`submit` 收 CSV 字节，后台 parse + ingest）；请求线程仅读字节 + 表存在性前置校验 | `batchAndAsyncImport` 回归 | ✅ 已修复 |
+| SS-8 | **HealthController 未认证泄露 dataDir 绝对路径** | 移除 `dataDir` 字段，仅保留 `dataDirWritable` 布尔 | 黑盒 AV-01 回归 | ✅ 已修复 |
+| SS-9 | **上传超限异常未映射为 4xx** | `MaxUploadSizeExceededException` → **413** PAYLOAD_TOO_LARGE 结构化错误体 | `UploadLimitTest`（新建） | ✅ 已修复 |
+| SS-10 | **client `escape()` 不完整 → 控制字符 key 生成非法 JSON** | 4 处 JSON 拼接改用 `ClientJson.quote`（含 `\uXXXX` 转义），删除不完整的 `escape()` | `ClientContractTest` 新增换行/引号/反斜杠 key 断言 | ✅ 已修复 |
+| SS-11 | **未知 API 端点返回 500 而非 404**（黑盒 AV-04 发现，D-12） | `NoResourceFoundException`→404 NOT_FOUND、`HttpRequestMethodNotSupportedException`→405 METHOD_NOT_ALLOWED，错误体结构化 | 黑盒 LD-01/LD-02 | ✅ 已修复（D-12） |
 
 ### 5.2 观察项（v1.0 清单，v1.1 状态）
 
@@ -111,10 +113,10 @@
 | SO-1 | `security.enabled` 默认 false（docker-compose/systemd 已强制 true；直接 `java -jar` 时 API 全开放） | 未处理 |
 | SO-2 | `resolveSegment` 前缀匹配越界（利用面低），建议边界判断 | 未处理 |
 | SO-3 | `BinaryProtocol.encode` nullable 且 nullBitmap==null → NPE（公共 API 无保护） | 未处理 |
-| SO-4 | `readString/readBytes` 无长度上限，恶意帧可触发大数组分配（OOM 面） | 未处理 |
+| SO-4 | `readString/readBytes` 无长度上限，恶意帧可触发大数组分配（OOM 面） | ✅ 随 SS-2 修复（varint 长度 ≤64MB 校验） |
 | SO-5 | `getFullSnapshot`/`queryFullSnapshotBinary` 先全量载入内存再流式写，注释不成立 | 未处理 |
 | SO-6 | `SlowQueryInterceptor` 对 JSON body 请求 `getParameter("table")` 恒为 null | 未处理 |
-| SO-7 | `CsvParser` 中间空行报 400（方向安全）；首行与列名全同时被当表头吞掉 | 未处理 |
+| SO-7 | `CsvParser` 中间空行报 400（方向安全）；首行与列名全同时被当表头吞掉 | 部分缓解（未闭合引号已报错；空行/表头行为未改） |
 | SO-8 | Jackson 2（core 传递依赖）与 Spring Boot 4 默认 Jackson 3 双栈并存 | 未处理 |
 | SO-9 | 错误消息可能泄露段文件绝对路径（`ApiExceptionHandler` 包装 `e.getMessage()`） | 未处理 |
 | SO-10 | `AstraDbService` 注释"缺省取系统时区"与 `application.yml` 默认 `Asia/Shanghai` 不符 | 未处理 |
@@ -126,36 +128,38 @@
 
 | 项目 | 文档声称 | 实测 | 结论 |
 |---|---|---|---|
-| 全量测试数量 | README 40 项 / optimization.md 48 项 | **63 项**（core 41 + client 15 + server 7，`mvn test` BUILD SUCCESS，2026-08-21 实测） | README/optimization 过时，需更新为 63 项 |
+| 全量测试数量 | README 40 项 / optimization.md 48 项 | **70 项**（core 41 + client 16 + server 13，`mvn test` BUILD SUCCESS，2026-08-21 实测） | 本次已同步为 70 项（README / optimization / phase-report / chain-test-* / review-p0） |
 | P0ReliabilityTest | review-p0 v1.1 写 7 项 | 10 项（v1.2 已更新） | 一致 |
 | core 回归 | R-01 交付写 41 项 | 41 项（34 原 + 7 ReviewShouldFixTest） | 一致 |
 | 黑盒测试 | blackbox-test-report v1.2 | **31 项**（可用性 7 + 完整性 8 + 安全性 9 + 最新交付 7）BUILD SUCCESS；另有定时导入长测（第 8 节） | 一致 |
-| 测试类数量 | chain-test-cases 声称"合计 16 类/56 项" | 15 类 / 58 个 `@Test`（默认执行 15 类 / 57 项，`AslpvConsistencyIT` 因 `*IT` 命名被 surefire 排除） | chain-test-cases 仍未更新（16 类自相矛盾） |
-| chain-test-cases F/P/S 表 A 用例 | "通过（归档前 118 项）" | 引用的测试类（CodecRoundtripTest、CsvParserTest 等）仍不存在 | 属"基线已归档"声明，无当前对应代码 |
-| defects 引用测试 | `manifestRebuildPreciseWindow`、`concurrentIngestDifferentTables` 等 | 类/方法不存在；由改名测试覆盖 | 文档测试名仍过时 |
+| 测试类数量 | chain-test-cases 原声称"合计 16 类/56 项"（自相矛盾） | 源码 18 类 / 71 个 `@Test`；默认执行 17 类 / 70 项（`AslpvConsistencyIT` 因 `*IT` 命名被 surefire 排除） | 已同步（chain-test-cases 附注更新为 18 类/71 项、执行 17 类/70 项） |
+| chain-test-cases F/P/S 表 A 用例 | "通过（归档前 118 项）" | 引用的测试类（CodecRoundtripTest、CsvParserTest 等）仍不存在 | 属"基线已归档"声明，无当前对应代码（既有说明保留） |
+| defects 引用测试 | `manifestRebuildPreciseWindow`、`concurrentIngestDifferentTables` 等 | 类/方法不存在；由改名测试覆盖（`StorageLifecycleTest.manifestRebuildAfterDeletionAndDrift`、`ConcurrencyTest.crossTableWritesAreParallel`） | 已同步（K-01/K-02 更新为现存测试名；D-xx 历史引用保留） |
 | 缺陷状态 | — | D-01~D-12 全部关闭、K-01~K-04 解决（defects.md 2026-08-21） | 一致 |
 
-## 7. 修复建议优先级（v1.1 更新）
+## 7. 修复建议优先级（v1.2 更新）
 
 | 优先级 | 项 | 理由 |
 |---|---|---|
-| **P0（下迭代必做）** | SS-4 管理台 XSS 转义；SS-3 `{noop}` → BCrypt + 强制改密；SS-5 CSV 未闭合引号报错 | 可被直接利用的安全面 / 静默错数据（SF-1、SF-3 已解决） |
-| **P1** | SS-1 createTable NPE→400；SS-2 二进制解码 500→400；SS-9 上传超限 413；SS-10 client escape 补全；SS-6 任务队列有界化；SS-7 importAsync 注释对齐；SS-8 health 路径脱敏 | 错误语义 / 资源边界 |
-| **P2** | 文档同步（README/optimization.md 测试数量 → 63 项；chain-test-cases 16 类自相矛盾；defects 测试名）；黑盒工程纳入 CI；性能黑盒断言；观察项 O-1~O-16、SO-1~SO-13 逐项评估 | 工程卫生与文档一致性 |
+| ~~P0~~ | ~~SS-4 XSS / SS-3 BCrypt / SS-5 CSV 引号~~ | **已随 R-02 全部修复**（v1.2） |
+| ~~P1~~ | ~~SS-1/SS-2/SS-6~SS-10~~ | **已随 R-02 全部修复**（v1.2） |
+| **P2（观察项评估）** | 黑盒工程纳入 CI；性能黑盒断言（写入 ≤5s / 读取 ≤2s）；观察项逐项评估：O-1~O-16（core）、SO-1~SO-3/SO-5~SO-13（server/client，SO-4/SO-7 已部分缓解）；文档同步后续随 O-15 治理 | 工程卫生与文档一致性 |
 
-## 8. 结论（v1.1）
+## 8. 结论（v1.2）
 
-1. **core 可靠性问题清零**：v1.0 的 8 项 core should-fix（SF-1~SF-8）经 R-01 交付全部修复，覆盖单测（ReviewShouldFixTest 7 项）与黑盒（LD-03~LD-06）双验证，跨表导入恢复并行、损坏段隔离、幂等随删除清理均生效；
-2. **D-12 关闭**：未知端点 404 / 方法不支持 405 错误语义修复，缺陷清零（D-01~D-12 关闭，K-01~K-04 解决）；
-3. **剩余风险集中在 server/client**：SS-3（弱口令）、SS-4（XSS）、SS-5（CSV 引号）为下一迭代 P0，SS-1/SS-2/SS-6~SS-10 为 P1；
-4. **文档漂移待治理**：README（40）、optimization.md（48）测试数量声明过时（实测 63），chain-test-cases"16 类"自相矛盾，建议随 O-15（CI 与文档卫生）一并更新。
+1. **全部 should-fix 清零**：v1.0 的 18 项 should-fix（core SF-1~SF-8 + server/client SS-1~SS-10）经 R-01/R-02 交付全部修复，单测（ReviewShouldFixTest 7 项、server/client 新增回归 14 项）与黑盒（LD-01~LD-07）双验证，缺陷清零（D-01~D-12 关闭，K-01~K-04 解决）；
+2. **全量 70 项 + 黑盒 31 项全绿**（2026-08-21 实测），错误语义（400/404/405/413）与安全默认值（BCrypt、XSS 转义、health 脱敏）达标；
+3. **剩余为观察项**（core O-1~O-16、server/client SO-1~SO-3/SO-5~SO-13），均为低风险工程卫生项，建议按 P2 逐项评估、随 O-15（CI 与文档卫生）治理；
+4. **文档漂移本次已治理**：README（70 项）、optimization.md（70 项）、phase-report.md（70 项、D-12 关闭）、chain-test-cases（18 类/71 项、执行 17 类/70 项）、chain-test-report（17 类/70 项）、review-p0（70 项）、defects K-01/K-02 测试名均已与实测同步。
 
 ## 9. 复审记录（2026-08-21）
 
 | 事件 | 内容 | 验证 |
 |---|---|---|
 | R-01 交付核对 | SF-1~SF-8 修复落地（代码抽查：`FsUtil.fsyncDir`、`removeIdem`/`rewriteIdemExcluding`、`quarantineCorruptSegment`、`TableState.idemLock`、`timestampRowCount` 均在位） | `ReviewShouldFixTest` 7 项；core 41 项；全量 63 项 BUILD SUCCESS；黑盒 LD-03~LD-06 |
+| R-02 交付核对 | SS-1~SS-10 修复落地（代码抽查：`SecurityConfig` DelegatingPasswordEncoder、`esc()`/`data-act` 前端转义、`CsvParser` 未闭合引号报错、`ImportTaskService` 有界队列、`HealthController` 脱敏、`ApiExceptionHandler` 413、`ClientJson.quote`） | server 13 项（含 `CsvParserTest` 4、`UploadLimitTest` 1）；client 16 项；全量 **70 项** BUILD SUCCESS |
 | D-12 交付核对 | `ApiExceptionHandler` 新增 404/405 映射（`NoResourceFoundException`/`HttpRequestMethodNotSupportedException`），错误体结构化 `{code,message,timestamp,path}` | 黑盒 LD-01/LD-02；黑盒全量 31 项 |
 | 黑盒最新交付验证 | LD-01~LD-07 全部通过（404/405、损坏段隔离、幂等清理重放、混合批、跨表并行、常规回归） | `LatestDeliveryAvailabilityTest` Tests run: 7, Failures: 0 |
 | 定时导入长测 | 压缩 20 表 × 每 1 分钟 client 导入 1000 条 ×10：10 快照全量/单点/历史全部正确，无新缺陷 | `ScheduledImportTest`（正式 543.8s） |
-| 测试数量演进 | 56（v1.0 实测）→ **63**（core 41 + client 15 + server 7）；黑盒 24 → 31 | `mvn test` BUILD SUCCESS |
+| 测试数量演进 | 56（v1.0 实测）→ 63（R-01）→ **70**（R-02：core 41 + client 16 + server 13）；黑盒 24 → 31 | `mvn test` BUILD SUCCESS |
+| 文档漂移治理 | README/optimization/phase-report 测试数量同步为 70 项；chain-test-cases 附注更新（18 类/71 项、执行 17 类/70 项）；chain-test-report 17 类/70 项；review-p0 数字同步；defects K-01/K-02 测试名更新 | 链接校验 0 损坏 |

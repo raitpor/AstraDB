@@ -4,7 +4,7 @@
 > 定位：第 1 章为**总体现状评价**（问题清单 G-01~G-11，迁移自 optimization.md 原 1.3 节）；第 2 章起为 **P0 可靠性优化专项评审**（O-01 / O-02 / O-03 的当前工作区实现）。
 > 评审历程：v1.0（2026-08-20 初评，verdict block）→ v1.1（并入总体评价，仍 block）→ **v1.2（复审通过，本版）**
 > 关联文档：[optimization.md](../design/optimization.md)（优化提案）、[review.md](./review.md)（全项目评审）、[design.md](../design/design.md)（设计）、[test/defects.md](../test/defects.md)（缺陷跟踪）
-> 评审方法：独立 review 子代理 + 人工代码逐行核查 + 测试实跑（`P0ReliabilityTest` 10 项全绿 + 全量 56 项回归）
+> 评审方法：独立 review 子代理 + 人工代码逐行核查 + 测试实跑（`P0ReliabilityTest` 10 项全绿 + 全量 70 项回归）
 
 ---
 
@@ -22,7 +22,7 @@
 | G-06 | **点字典全字符串驻留**：INT/LONG 主键经 `primaryKeyString` 转 String，`idToKey` ArrayList + pending 列表是百万级 key 内存大头 | 中 | 候选 |
 | G-07 | **查询路径装箱**：`Row(key, List<Object> values)` 每行每值装箱；`fullSnapshot` core 层全量驻留再组装（"流式"仅到 JSON 层） | 中 | 候选 |
 | G-08 | **Gorilla 随机访问退化**：`valueAt` 必须从块头重放（O(行)），单点历史查询每快照每列重放 | 中 | 候选 |
-| G-09 | **文档与实现漂移**：README curl 注释写 `getSnapshot`"最近一次 ≤ ts"，实现为精确匹配（`timestampAt(idx) != ts` 返回空）；测试数量 README 声称 40/99 项，实际 56 项 | 低 | 候选 |
+| G-09 | **文档与实现漂移**：README curl 注释写 `getSnapshot`"最近一次 ≤ ts"，实现为精确匹配（`timestampAt(idx) != ts` 返回空）；测试数量 README 声称 40/99 项，实际 70 项 | 低 | 候选 |
 | G-10 | **安全默认值弱**：密码 `admin123` 明文（`{noop}`）；无 TLS/限流说明 | 低 | 候选 |
 | G-11 | **专有格式无逃生通道**：无段导出工具（CSV/Parquet），5 年数据仅存于专有格式 | 低 | 候选 |
 
@@ -35,7 +35,7 @@
 - **B-1（锁序反转死锁）已修复**：`ingest` / `ingestBatch` 统一为先表写锁、后幂等锁，无任何"幂等锁 → 表锁"嵌套路径；新增回归 `concurrentIngestAndIngestBatchNoDeadlock`；
 - **B-2（STRING 32 位哈希域）已修复**：`contentHash64` STRING 分支逐 char 直接喂 FNV-1a（64 位区分度），弃用 `String.hashCode()`；新增冲突对回归 `stringHashDistinguishesHashCodeCollisions`；
 - **S-1/S-2/S-3/O-2 已修复**，**S-4 已文档化接受**（"近似原子"，见下）；
-- **测试证据更新**：`P0ReliabilityTest` 由评审当日 7 项扩至 **10 项**，实跑全绿；全量回归 **56 项全绿**（core 34 + client 15 + server 7，`mvn test` BUILD SUCCESS）；
+- **测试证据更新**：`P0ReliabilityTest` 由评审当日 7 项扩至 **10 项**，实跑全绿；全量回归 **70 项全绿**（core 41 + client 16 + server 13，2026-08-21 `mvn test` BUILD SUCCESS）；
 - **缺陷闭环**：D-10 / D-11 已按本报告登记至 defects.md 并验证关闭。
 
 | v1.1 问题 | 修复内容 | 回归测试 | 状态 |
@@ -153,7 +153,7 @@
 
 | 命令 | 结果 |
 |---|---|
-| `mvn test`（2026-08-20 复审实跑） | **BUILD SUCCESS，14 类 / 56 项全绿**（core 34 + client 15 + server 7） |
+| `mvn test`（2026-08-21 复审实跑） | **BUILD SUCCESS，17 类 / 70 项全绿**（core 41 + client 16 + server 13） |
 | `mvn test -pl core -Dtest=P0ReliabilityTest` | `Tests run: 10, Failures: 0, Errors: 0, Skipped: 0` |
 | `P0ReliabilityTest` 用例清单（10 项） | `dataDirLockRejectsSecondInstance`、`idempotentReplaySkipsSameContent`、`idempotentBatchReplaySkipsWholeBatch`、`idempotencySurvivesRestart`、`corruptedIdemFileDegradesGracefully`、`hash64DistinguishesDifferentContents`、`concurrentIngestAndIngestBatchNoDeadlock`（B-1 回归）、`stringHashDistinguishesHashCodeCollisions`（B-2 回归）、`openFailureReleasesLockAndRetrySucceeds`（S-1 回归）、`batchAtomicNewSegmentsAndStagingCleanup` |
 | 覆盖缺口（v1.2） | ① 删除数据后幂等记录清理（review.md SF-1）无测试；② 损坏段拒启动的隔离/自愈（review.md SF-3）无测试；③ 幂等锁全局串行化（review.md SF-4）无针对性测试 |
@@ -162,5 +162,5 @@
 
 1. **P0 可靠性优化放行**：O-01/O-02/O-03 达到设计目标，D-10/D-11 关闭，全量回归通过；
 2. **新增问题移交全项目评审**：本报告之外发现的幂等残留（SF-1）、损坏段拒启动（SF-3）、幂等锁全局串行（SF-4）等已列入 [review.md](./review.md)，并于 **2026-08-21 经 R-01 交付全部修复**（`ReviewShouldFixTest` 7 项 + 黑盒 LD-03~LD-06 验证）；剩余 server/client 问题（SS-1~SS-10）留待后续迭代；
-3. **文档同步**：README（40 项）、optimization.md（48 项）中的测试数量声明已过时，实测为 56 项（14 类），需随本报告更新；
+3. **文档同步**：README（40 项）、optimization.md（48 项）中的测试数量声明已过时，实测为 70 项（17 类），需随本报告更新；
 4. **遗留优化项**：G-04~G-11 对应 O-04~O-16 按 [optimization.md](../design/optimization.md) 路线图推进。
