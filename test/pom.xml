@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AstraDB 黑盒测试工程（独立于主构建）：
+  - 真实启动 server jar（随机端口 + 临时数据目录），经 HTTP API 黑盒验证
+    可用性 / 完整性 / 安全性（依据 docs/design/scenario.md）。
+  - 不挂接根 pom（不动任何非测试代码）；依赖仅 junit-jupiter + jackson-databind（本地仓库 .m2-repository）。
+  运行：mvn -f test/pom.xml test   （先构建 server jar：mvn -pl server -am package -Dmaven.test.skip=true）
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.astradb</groupId>
+  <artifactId>astradb-blackbox-test</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>AstraDB BlackBox Test</name>
+  <description>黑盒测试：真实 server 进程 + HTTP API（可用性/完整性/安全性）</description>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>25</maven.compiler.release>
+    <junit.version>5.11.4</junit.version>
+    <jackson.version>2.18.2</jackson.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${jackson.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+        <configuration>
+          <!-- 黑盒测试需要启动真实进程，串行执行避免端口/资源竞争 -->
+          <parallel>none</parallel>
+          <trimStackTrace>false</trimStackTrace>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

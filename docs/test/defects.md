@@ -138,6 +138,18 @@
 | 验证 | 新增 stats 断言（回填后 chunkCount=2/rows=4）+ `batchBackfillIntoMiddleGap`（chunkCount=4/rows=8）+ 全量 99 项回归通过 |
 | 状态 | **已验证（关闭）** |
 
+### D-12（黑盒测试发现，新建）
+
+| 项 | 内容 |
+|---|---|
+| 标题 | 未知 API 端点返回 HTTP 500（INTERNAL_ERROR），应为 404 |
+| 发现 | 黑盒测试（`test/` 工程 `AvailabilityTest.avUnknownEndpoint404`）：`POST /api/notExistEndpoint` 实测返回 **500** 而非 404 |
+| 严重度 | P2（错误语义错误：客户端契约/HTTP 规范要求未知端点 404；500 会被监控误判为服务故障；非数据损坏） |
+| 根因 | `ApiExceptionHandler` 的 `@ExceptionHandler(Exception.class)` 兜底把 Spring 的 `NoResourceFoundException`（未知端点 404 语义）也映射为 `INTERNAL_ERROR` 500；缺少对 `NoResourceFoundException`（及方法不支持类异常）的 404 映射 |
+| 处置 | **挂起（待 server 修复）**：应在 `ApiExceptionHandler` 增加 `NoResourceFoundException` → 404 的处理（含结构化错误体）；黑盒用例 `avUnknownEndpoint404` 已标记 `@Disabled` 引用本缺陷，修复后启用 |
+| 验证 | 黑盒 24 项用例中 23 项通过、仅此项失败（复现稳定）；其余用例不受影响 |
+| 状态 | **新建（未修复）** |
+
 ## 3. 已知问题（K-xx，持续跟踪）
 
 | ID | 描述 | 影响 | 处置 | 状态 |
@@ -151,9 +163,9 @@
 
 | 阶段 | 数量 |
 |---|---|
-| 发现缺陷（本次执行） | 11（D-01~D-11；D-08 全量测试新增、D-09 独立审查新增、D-10/D-11 评审报告 review-p0.md 登记） |
+| 发现缺陷（累计） | 12（D-01~D-12；D-08 全量测试新增、D-09 独立审查新增、D-10/D-11 评审报告 review-p0.md 登记、D-12 黑盒测试新增） |
 | 已修复并验证 | 11 |
-| 未解决缺陷 | 0 |
+| 未解决缺陷 | 1（D-12 新建，待 server 修复） |
 | 已知问题 | 4（K-01~K-04 全部已解决） |
 
 ## 5. 过程记录
@@ -168,3 +180,4 @@
 - 2026-08-19：全链条测试（功能/性能/安全，端到端）执行完毕，**未发现新缺陷**（D-01~D-09 维持关闭）；测试计划/用例/报告见 chain-test-*.md。
 - 2026-08-17：实现任意时间戳回填与删除指定快照（段重写）后，独立审查发现 manifest 双重计数 → 登记 D-09；修复（重写分支传新增量 + reader 关闭顺序 + tmp 清理）+ stats 断言与批量回填测试 + 99 项回归通过 → D-09 关闭（已验证）。
 - 2026-08-20：P0 可靠性优化评审（review-p0.md，verdict block）发现：① `ingest` 与 `ingestBatch` 锁序相反（幂等锁→表锁 vs 表锁→幂等锁）同表并发可死锁 → 登记 D-10；② `contentHash64` STRING 分支用 `String.hashCode()`（32 位域）可构造碰撞致幂等误判静默丢数据 → 登记 D-11。修复：D-10 统一锁序为先表写锁后幂等锁（含并发回归 `concurrentIngestAndIngestBatchNoDeadlock`）；D-11 STRING 逐 char 喂 FNV-1a（含冲突对回归 `stringHashDistinguishesHashCodeCollisions`）；另修复 S-1（open 锁异常路径泄漏，`openFailureReleasesLockAndRetrySucceeds`）、S-2（幂等 fsync 批内合并）、S-3（预写占位幂等消除提交后崩溃窗口）、O-2（降级 WARN 日志）→ P0 测试 10 项 + 全量 56 项回归通过 → D-10/D-11 关闭（已验证）。
+- 2026-08-21：黑盒测试（根目录 `test/` 工程，真实 server 进程 + HTTP API，24 项用例覆盖可用性/完整性/安全性）执行：23 项通过，`avUnknownEndpoint404` 失败——`POST /api/notExistEndpoint` 实测返回 500 而非 404 → 登记 D-12（根因：`ApiExceptionHandler` 全局 `Exception` 兜底吞掉 `NoResourceFoundException` 的 404 语义）；用例 `@Disabled` 引用 D-12 待修复启用，其余 23 项全绿 → D-12 新建（未修复）。
