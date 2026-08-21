@@ -1,8 +1,9 @@
 # AstraDB 黑盒测试报告
 
-> 版本：v1.0 · 日期：2026-08-21 · 状态：**通过（1 项缺陷 D-12 挂起）**
+> 版本：v1.1 · 日期：2026-08-21 · 状态：**通过（1 项缺陷 D-12 挂起）**
 > 关联：[scenario.md](../design/scenario.md)（场景）、[design.md](../design/design.md)（设计）、[defects.md](./defects.md)（缺陷跟踪）
 > 执行方式：根目录 `test/` 独立测试工程（不挂主构建，**未改动任何非测试代码**），真实启动 server jar + HTTP API 黑盒验证
+> 变更：v1.1 追加第 8 节"定时导入长测"（spring @Scheduled + astradb-client，每 1 分钟 1000 条 ×10）
 
 ---
 
@@ -81,3 +82,32 @@
 **遗留**：
 1. **D-12（P2）**：未知端点 500 而非 404——建议在 `ApiExceptionHandler` 增加 `NoResourceFoundException` → 404 映射（结构化错误体），修复后启用 `avUnknownEndpoint404` 并回归；
 2. **建议**：将 `test/` 黑盒工程纳入 CI（构建 server jar → 跑黑盒）；性能专项（写入/读取时延 ≤5s/≤2s 的 scenario 约束）建议后续以黑盒方式补充计时断言。
+
+## 8. 定时导入长测（spring @Scheduled + astradb-client，2026-08-21 追加）
+
+> 依据测试计划：① 启动服务端建表test（主键 `pointId` INT、数据列 `pointValue` DOUBLE、**压缩等级 20**）；② 以 spring 实现定时任务，每 1 分钟用 client 导入 1000 条，运行十分钟停止；③ 逐个快照全量查询与单点查询，确认可查询且数据正确。
+> 测试代码：`test/src/test/java/com/astradb/blackbox/ScheduledImportTest.java`（spring-context `@EnableScheduling` + `@Scheduled` + astradb-client）。
+
+### 8.1 执行过程
+
+| 步骤 | 内容 | 结果 |
+|---|---|---|
+| 1 建表 | `POST /api/createTable`：`test`，columns=[pointId INT(主键), pointValue DOUBLE]，compressionLevel=20 | ✅ 200 |
+| 2 定时导入 | spring `@Scheduled(fixedDelay=60s)` 任务用 `AstraDbClient.ingest` 导入：固定 1000 点（id=1..1000），值 = `id*0.5 + 批次*0.1`（跨快照可区分），共 **10 次**，时间戳递增 60s | ✅ 10/10 成功，每次 1000 行 |
+| 3 验证 | 逐个快照（10 个）全量查询 + 单点查询 + 单点历史 | ✅ 全部通过 |
+
+- **冒烟**（同链路，interval=2s × 3 次）：3 次导入 + 3 快照全量/单点/单点历史全部通过 → 确认 spring 定时 + client 导入 + 验证逻辑链路正确；
+- **正式十分钟运行**：10 次导入完成，**总耗时 543.8s**（每 1 分钟一次，符合计划）；每次导入 1000 行、行数断言通过。
+
+### 8.2 验证结果
+
+| 验证项 | 覆盖 | 结果 |
+|---|---|---|
+| 快照完整性 | `listSnapshots` = 10 个时间点，严格递增 | ✅ 通过 |
+| 全量查询（client `queryFullSnapshot`） | 10 个快照逐个：总行数 = 1000；抽查行 1/500/1000 的主键与值（`id*0.5+批次*0.1`） | ✅ 10/10 通过 |
+| 单点查询（client `queryPointAt`） | 10 个快照逐个：抽查点 1/250/1000 的值 | ✅ 10/10 通过 |
+| 单点历史（`getPointSeries`） | 点 1 在 10 个快照的值序列（0.5, 0.6, …, 1.4）与时间戳一一对应 | ✅ 通过（跨快照不串数据） |
+
+### 8.3 结论
+
+**定时导入长测通过**：压缩等级 20 的表在"每 1 分钟 client 导入 1000 条 ×10"负载下，10 个快照全部可查、全量与单点数据正确（含值随批次变化的跨快照区分验证）；spring 定时任务与 client 二进制导入链路稳定，**未发现新缺陷**。

@@ -7,8 +7,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.io.IOException;
 
@@ -27,6 +29,8 @@ public class ApiExceptionHandler {
     public static final String CODE_UNPARSEABLE_BODY = "UNPARSEABLE_BODY";
     public static final String CODE_STORAGE_ERROR = "STORAGE_ERROR";
     public static final String CODE_INTERNAL_ERROR = "INTERNAL_ERROR";
+    public static final String CODE_NOT_FOUND = "NOT_FOUND";
+    public static final String CODE_METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED";
 
     public record ApiError(String code, String message, long timestamp, String path) {
         static ApiError of(String code, String message, HttpServletRequest req) {
@@ -52,6 +56,20 @@ public class ApiExceptionHandler {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(ApiError.of(CODE_UNPARSEABLE_BODY,
                         "请求体无法解析: " + e.getMostSpecificCause().getMessage(), req));
+    }
+
+    /** D-12：未知端点 → 404（避免被全局 Exception 兜底误判为 500 INTERNAL_ERROR）。 */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ApiError> notFound(NoResourceFoundException e, HttpServletRequest req) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ApiError.of(CODE_NOT_FOUND, "接口不存在: " + e.getResourcePath(), req));
+    }
+
+    /** 方法不支持 → 405（同类错误语义：客户端契约错误，非服务故障）。 */
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<ApiError> methodNotAllowed(HttpRequestMethodNotSupportedException e, HttpServletRequest req) {
+        return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED)
+                .body(ApiError.of(CODE_METHOD_NOT_ALLOWED, "方法不支持: " + e.getMessage(), req));
     }
 
     @ExceptionHandler(IOException.class)

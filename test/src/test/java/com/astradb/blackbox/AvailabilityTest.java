@@ -70,7 +70,6 @@ public class AvailabilityTest extends BlackBoxBase {
 
     @Test
     @DisplayName("AV-04 未知端点返回 404（非 500）")
-    @org.junit.jupiter.api.Disabled("登记 D-12（docs/test/defects.md）：未知端点被全局 Exception 兜底映射为 500 INTERNAL_ERROR 而非 404，待 server 修复后启用")
     void avUnknownEndpoint404() throws Exception {
         HttpResponse<String> r = ServerHarness.send("POST", "/api/notExistEndpoint", "{}", null);
         assertEquals(404, r.statusCode(), "未知端点应 404，实际 " + r.statusCode());
