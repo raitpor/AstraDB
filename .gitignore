@@ -6,3 +6,4 @@ reasonix*
 .vscode/
 .mvn/
 data/
+**/archive/

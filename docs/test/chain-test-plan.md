@@ -80,9 +80,9 @@
 
 | 域 | 交付项 | 设计依据 |
 |---|---|---|
-| R1 批量导入原子化 | O-01：新段 staging 两阶段提交（`.staging/*.tmp` → `ATOMIC_MOVE` rename → manifest 一次保存） | optimization.md §2.1 O-01 |
-| R2 幂等导入 | O-02：64 位内容哈希（FNV-1a）+ `idempotency.idx` 文件持久化 + 跨重启重放 + 损坏降级 | optimization.md §2.1 O-02 |
-| R3 dataDir 文件锁 | O-03：`FileChannel.tryLock` 排他锁 + 异常路径释放 | optimization.md §2.1 O-03 |
+| R1 批量导入原子化 | O-01：新段 staging 两阶段提交（`.staging/*.tmp` → `ATOMIC_MOVE` rename → manifest 一次保存） | optimization.md §6.1 O-01 |
+| R2 幂等导入 | O-02：64 位内容哈希（FNV-1a）+ `idempotency.idx` 文件持久化 + 跨重启重放 + 损坏降级 | optimization.md §6.2 O-02 |
+| R3 dataDir 文件锁 | O-03：`FileChannel.tryLock` 排他锁 + 异常路径释放 | optimization.md §6.3 O-03 |
 | R4 评审修复回归 | B-1 锁序统一（表锁→幂等锁）、B-2 STRING 逐 char 哈希、S-1 open 锁泄漏、S-2 批内幂等 fsync、S-3 预写占位、O-2 降级告警 | review-p0.md §4 |
 
 ### 7.2 专项策略

@@ -85,11 +85,17 @@ class ApiContractTest {
                 .andExpect(jsonPath("$.length()").value(1));
         mvc.perform(post("/api/getSnapshot").contentType("application/json")
                         .content("{\"table\":\"ct\",\"ts\":" + T0 + ",\"offset\":0,\"limit\":10}"))
+                .andExpect(jsonPath("$.pk").value("id"))
+                .andExpect(jsonPath("$.columns[0]").value("id"))
+                .andExpect(jsonPath("$.columns[1]").value("a"))
                 .andExpect(jsonPath("$.totalRows").value(2))
-                .andExpect(jsonPath("$.rows[1].values[0]").isEmpty()); // null
+                .andExpect(jsonPath("$.rows[1][1]").isEmpty()); // null（行2 的 a 列）
         mvc.perform(post("/api/getFullSnapshot").contentType("application/json")
                         .content("{\"table\":\"ct\",\"ts\":" + T0 + "}"))
-                .andExpect(jsonPath("$.totalRows").value(2));
+                .andExpect(jsonPath("$.pk").value("id"))
+                .andExpect(jsonPath("$.columns[0]").value("id"))
+                .andExpect(jsonPath("$.totalRows").value(2))
+                .andExpect(jsonPath("$.rows[0][0]").value(1)); // 行1 主键值
 
         // 回填中间空洞 + 重复拒绝 + 删除快照
         mvc.perform(multipart("/api/importSnapshot").file(csv("s2.csv", "1,20,2.5\n"))

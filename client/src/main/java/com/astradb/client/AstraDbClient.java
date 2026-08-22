@@ -136,24 +136,38 @@ public final class AstraDbClient {
         String body = "{\"table\":" + ClientJson.quote(table) + ",\"key\":" + ClientJson.quote(key)
                 + ",\"from\":" + timestamp + ",\"to\":" + timestamp + ",\"limit\":1}";
         Node resp = postJson("/api/getPointSeries", body);
-        List<Node> arr = resp.asArray();
-        if (arr.isEmpty()) {
+        List<Node> rows = resp.get("rows").asArray();
+        if (rows.isEmpty()) {
             return null;
         }
-        List<Node> values = arr.get(0).get("values").asArray();
-        Object[] out = new Object[values.size()];
-        for (int i = 0; i < values.size(); i++) {
-            Node v = values.get(i);
+        // 列式响应：columns 含主键列（首位），rows 每行含主键值 → 跳过主键列返回值列数组
+        List<Node> columns = resp.get("columns").asArray();
+        String pk = resp.get("pk").asText();
+        int pkIdx = 0;
+        for (int i = 0; i < columns.size(); i++) {
+            if (columns.get(i).asText().equals(pk)) {
+                pkIdx = i;
+                break;
+            }
+        }
+        List<Node> row = rows.get(0).asArray();
+        Object[] out = new Object[row.size() - 1];
+        int o = 0;
+        for (int i = 0; i < row.size(); i++) {
+            if (i == pkIdx) {
+                continue;
+            }
+            Node v = row.get(i);
             if (v.isNull()) {
-                out[i] = null;
+                out[o++] = null;
             } else if (v.isNumber()) {
                 if (v.isFloatingPoint()) {
-                    out[i] = v.asDouble();
+                    out[o++] = v.asDouble();
                 } else {
-                    out[i] = v.asLong();
+                    out[o++] = v.asLong();
                 }
             } else {
-                out[i] = v.asText();
+                out[o++] = v.asText();
             }
         }
         return out;

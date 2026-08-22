@@ -91,7 +91,7 @@ public class LatestDeliveryAvailabilityTest {
         // 好表数据完好可查
         JsonNode goodFull = post("/api/getFullSnapshot", "{\"table\":\"" + good + "\",\"ts\":" + T0 + "}");
         assertEquals(1, goodFull.get("totalRows").asLong(), "好表数据应完好");
-        assertEquals("g", goodFull.get("rows").get(0).get("values").get(1).asText());
+        assertEquals("g", goodFull.get("rows").get(0).get(2).asText()); // 列式 row=[key,v,region]
         // 坏表段被隔离：manifest 中段计数为 0（黑盒可见）
         JsonNode badStats = post("/api/getTableStats", "{\"table\":\"" + bad + "\"}");
         assertEquals(0, badStats.get("segmentCount").asLong(), "坏段应从 manifest 剔除: " + badStats);
@@ -126,7 +126,7 @@ public class LatestDeliveryAvailabilityTest {
         assertEquals(200, replay.statusCode(), "重放应成功: " + replay.body());
         JsonNode restored = post("/api/getFullSnapshot", "{\"table\":\"" + t + "\",\"ts\":" + T0 + "}");
         assertEquals(2, restored.get("totalRows").asLong(), "删除后重放应真正写入（快照恢复）");
-        assertEquals(2.0, restored.get("rows").get(1).get("values").get(0).asDouble(), 1e-9);
+        assertEquals(2.0, restored.get("rows").get(1).get(1).asDouble(), 1e-9);
         deleteTableQuiet(t);
     }
 
@@ -152,9 +152,9 @@ public class LatestDeliveryAvailabilityTest {
         JsonNode list = post("/api/listSnapshots", "{\"table\":\"" + t + "\"}");
         assertEquals(3, list.size(), "应有 3 个快照: " + list);
         JsonNode ts1 = post("/api/getFullSnapshot", "{\"table\":\"" + t + "\",\"ts\":" + T0 + "}");
-        assertEquals(1.0, ts1.get("rows").get(0).get("values").get(0).asDouble(), 1e-9, "ts1 数据不应变化");
+        assertEquals(1.0, ts1.get("rows").get(0).get(1).asDouble(), 1e-9, "ts1 数据不应变化");
         JsonNode ts3 = post("/api/getFullSnapshot", "{\"table\":\"" + t + "\",\"ts\":" + (T0 + 120_000L) + "}");
-        assertEquals(3.0, ts3.get("rows").get(0).get("values").get(0).asDouble(), 1e-9, "ts3 新数据应正确");
+        assertEquals(3.0, ts3.get("rows").get(0).get(1).asDouble(), 1e-9, "ts3 新数据应正确");
         deleteTableQuiet(t);
     }
 
@@ -198,7 +198,7 @@ public class LatestDeliveryAvailabilityTest {
         assertEquals(2, a.get("totalRows").asLong());
         JsonNode b = post("/api/getFullSnapshot", "{\"table\":\"" + tb + "\",\"ts\":" + T0 + "}");
         assertEquals(1, b.get("totalRows").asLong());
-        assertEquals(3.0, b.get("rows").get(0).get("values").get(0).asDouble(), 1e-9);
+        assertEquals(3.0, b.get("rows").get(0).get(1).asDouble(), 1e-9);
         deleteTableQuiet(ta);
         deleteTableQuiet(tb);
     }
@@ -217,7 +217,7 @@ public class LatestDeliveryAvailabilityTest {
         JsonNode snap = post("/api/getSnapshot",
                 "{\"table\":\"" + t + "\",\"ts\":" + T0 + ",\"offset\":0,\"limit\":10}");
         assertEquals(1, snap.get("totalRows").asLong());
-        assertEquals(1.5, snap.get("rows").get(0).get("values").get(0).asDouble(), 1e-9);
+        assertEquals(1.5, snap.get("rows").get(0).get(1).asDouble(), 1e-9);
         deleteTableQuiet(t);
     }
 

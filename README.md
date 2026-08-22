@@ -137,13 +137,16 @@ curl -X POST $BASE/api/createTable -H 'Content-Type: application/json' -d '{
 printf '1,1,20.5,华东\n2,2,21.0,华北\n' > snap.csv
 curl -X POST $BASE/api/importSnapshot -F table=dev -F timestamp=1767225600000 -F file=@snap.csv
 
-# 按时间点取全量快照（最近一次 ≤ ts）
+# 按时间点取全量快照（分页；返回列式格式：pk=主键列名、columns=列名数组（主键在首位）、rows=二维数组（每行含主键值））
 curl -X POST $BASE/api/getSnapshot -H 'Content-Type: application/json' \
   -d '{"table":"dev","ts":1767225600000,"offset":0,"limit":100}'
+# 响应：{"pk":"id","columns":["id","c1","c2","c3"],"timestamp":...,"totalRows":...,"offset":0,"limit":100,
+#        "rows":[[1,1,20.5,"华东"],[2,2,21.0,"华北"]]}
 
-# 单点历史
+# 单点历史（返回 pk/columns/rows/timestamps，timestamps 与 rows 一一对齐）
 curl -X POST $BASE/api/getPointSeries -H 'Content-Type: application/json' \
   -d '{"table":"dev","key":"1","from":0,"to":9999999999999,"limit":1000}'
+# 响应：{"pk":"id","columns":["id","c1","c2","c3"],"rows":[[1,1,20.5,"华东"],...],"timestamps":[1767225600000,...]}
 ```
 
 ## API（全部 POST，路径为明确操作）

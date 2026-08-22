@@ -1,6 +1,7 @@
 package com.astradb.server.api;
 
 import com.astradb.core.ingest.SnapshotIngestor;
+import com.astradb.core.meta.Schema;
 import com.astradb.core.query.PointSeriesQuery;
 import com.astradb.core.query.SnapshotQuery;
 import com.astradb.server.service.AstraDbService;
@@ -60,6 +61,16 @@ public class DataController {
     public record DeleteSegmentRequest(String table, String path, Boolean confirm) {
     }
 
+    /** 列式分页响应：主键列名 + 列名数组（主键在首位）+ 二维行数据（每行含主键值）。 */
+    public record ColumnarPage(String pk, List<String> columns, List<Object[]> rows,
+                               long timestamp, long totalRows, int offset, int limit) {
+    }
+
+    /** 列式点系列响应：时间戳数组与 rows 一一对齐（columns 不含时间戳元列）。 */
+    public record ColumnarSeries(String pk, List<String> columns, List<Object[]> rows,
+                                 List<Long> timestamps) {
+    }
+
     @PostMapping("/importSnapshot")
     public SnapshotIngestor.IngestResult importSnapshot(
             @RequestParam("table") String table,
@@ -104,30 +115,42 @@ public class DataController {
     }
 
     @PostMapping("/getSnapshot")
-    public SnapshotQuery.SnapshotPage getSnapshot(@RequestBody SnapshotRequest req) throws IOException {
-        return service.db().snapshot(req.table(), req.ts(), req.offset(), req.limit());
+    public ColumnarPage getSnapshot(@RequestBody SnapshotRequest req) throws IOException {
+        SnapshotQuery.SnapshotPage page = service.db().snapshot(req.table(), req.ts(), req.offset(), req.limit());
+        Schema schema = service.db().tableInfo(req.table()).schema();
+        List<String> columns = schema.columns().stream().map(c -> c.name()).toList();
+        List<Object[]> rows = page.rows().stream().map(DataController::columnarRow).toList();
+        return new ColumnarPage(columns.get(schema.primaryKeyIndex()), columns, rows,
+                page.timestamp(), page.totalRows(), page.offset(), page.limit());
     }
 
     /** 全量快照（不分页，流式 JSON 输出避免整页内存缓冲）。 */
     @PostMapping("/getFullSnapshot")
     public void getFullSnapshot(@RequestBody FullSnapshotRequest req, HttpServletResponse resp) throws IOException {
         SnapshotQuery.FullSnapshot fs = service.db().fullSnapshot(req.table(), req.ts());
+        Schema schema = service.db().tableInfo(req.table()).schema();
+        List<String> columns = schema.columns().stream().map(c -> c.name()).toList();
+        String pk = columns.get(schema.primaryKeyIndex());
         resp.setContentType(MediaType.APPLICATION_JSON_VALUE);
         resp.setCharacterEncoding(StandardCharsets.UTF_8.name());
         try (JsonGenerator g = new JsonFactory().createGenerator(resp.getOutputStream())) {
             g.writeStartObject();
+            g.writeStringField("pk", pk);
+            g.writeArrayFieldStart("columns");
+            for (String c : columns) {
+                g.writeString(c);
+            }
+            g.writeEndArray();
             g.writeNumberField("timestamp", fs.timestamp());
             g.writeNumberField("totalRows", fs.totalRows());
             g.writeArrayFieldStart("rows");
             for (SnapshotQuery.Row row : fs.rows()) {
-                g.writeStartObject();
-                g.writeStringField("key", row.key());
-                g.writeArrayFieldStart("values");
+                g.writeStartArray();
+                g.writeObject(row.key());
                 for (Object v : row.values()) {
                     g.writeObject(v);
                 }
                 g.writeEndArray();
-                g.writeEndObject();
             }
             g.writeEndArray();
             g.writeEndObject();
@@ -136,8 +159,31 @@ public class DataController {
     }
 
     @PostMapping("/getPointSeries")
-    public List<PointSeriesQuery.PointRecord> getPointSeries(@RequestBody SeriesRequest req) throws IOException {
-        return service.db().series(req.table(), req.key(), req.from(), req.to(), req.limit());
+    public ColumnarSeries getPointSeries(@RequestBody SeriesRequest req) throws IOException {
+        List<PointSeriesQuery.PointRecord> records =
+                service.db().series(req.table(), req.key(), req.from(), req.to(), req.limit());
+        Schema schema = service.db().tableInfo(req.table()).schema();
+        List<String> columns = schema.columns().stream().map(c -> c.name()).toList();
+        List<Object[]> rows = records.stream().map(r -> {
+            Object[] arr = new Object[r.values().size() + 1];
+            arr[0] = req.key();
+            for (int i = 0; i < r.values().size(); i++) {
+                arr[i + 1] = r.values().get(i);
+            }
+            return arr;
+        }).toList();
+        List<Long> timestamps = records.stream().map(PointSeriesQuery.PointRecord::timestamp).toList();
+        return new ColumnarSeries(columns.get(schema.primaryKeyIndex()), columns, rows, timestamps);
+    }
+
+    /** 构造列式行：主键值在首位 + 各数据列值（与 columns 顺序一致）。 */
+    private static Object[] columnarRow(SnapshotQuery.Row row) {
+        Object[] arr = new Object[row.values().size() + 1];
+        arr[0] = row.key();
+        for (int i = 0; i < row.values().size(); i++) {
+            arr[i + 1] = row.values().get(i);
+        }
+        return arr;
     }
 
     /** 删除指定时间点的快照（不可恢复，需 confirm=true）。 */

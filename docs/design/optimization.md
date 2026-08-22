@@ -1,8 +1,8 @@
 # AstraDB 评价与优化方案
 
-> 版本：v1.1（评审稿） · 日期：2026-08-20 · 状态：待评审
-> 关联文档：[design.md](./design.md)（设计）、[scenario.md](./scenario.md)（场景）、[phase-report.md](../phaseReport/phase-report.md)（阶段报告）、[test/defects.md](../test/defects.md)（缺陷跟踪）
-> 说明：本文档为**优化提案**，所有优化项均标注状态（`候选` = 未实施；`已实施` = 代码已落地，实施情况与遗留局限见各节，待并入 design.md 16 节）。不含代码实现，仅描述动机、方案要点、预期收益、验收标准与实施情况。
+> 版本：v1.2（正式）· 日期：2026-08-21 · 状态：**正式（P0 优化项已实施归档）**
+> 关联文档：[design.md](./design.md)（设计）、[scenario.md](./scenario.md)（场景）、[phase-report.md](../phaseReport/phase-report.md)（阶段报告）、[review-p0.md](../review/review-p0.md)（P0 专项评审）、[review.md](../review/review.md)（全项目评审）、[R-01 交付](../archive/phaseReport/R-01-review-shouldfix.md)、[R-02 交付](../archive/phaseReport/R-02-review-server-shouldfix.md)、[test/defects.md](../test/defects.md)（缺陷跟踪）
+> 说明：本文档为**优化提案**。已实施项标注 `已归档`（P0 的 O-01~O-03 已实施、评审放行并归档，记录见第 6 章；归档含最终实施情况、验收与交付证据）；未实施项标注 `候选`（保留动机/方案要点/验收标准）。问题清单（G-01~G-11）已移入 [review-p0.md](../review/review-p0.md) 第 1 章。
 
 ---
 
@@ -39,39 +39,9 @@ AstraDB 是一套**定位清晰、完成度高的自研存储引擎**：以"周�
 
 > 优先级定义：**P0** = 正确性与可靠性缺口（先补）；**P1** = 核心竞争力的内存/性能（中期）；**P2** = 功能与查询能力延伸（产品力）；**P3** = 运维与工程卫生（长期）。每项含验收标准（可量化）。
 
-### 2.1 P0 · 可靠性与正确性
+### 2.1 P0 · 可靠性与正确性 —— **已实施并归档**
 
-#### O-01 批量导入原子化（staging 两阶段提交）`已实施`
-
-- **动机**：消除 G-01 的"部分提交"窗口。当前批量导入逐段落盘，中途崩溃后磁盘上是一组不一致的段集合。
-- **方案要点**：批量快照先编码到表目录下 staging 临时段（`segments/.staging/*.tmp`），全部完成后统一 rename 到 `segments/` 正式路径 + 一次 manifest 更新。同文件系统 rename 为 O(1) 元数据操作；与现有"临时文件 + rename"哲学一致。启动校验已清理 `*.tmp` 残留（`AstraDB.validateManifest`），可复用。
-- **预期收益**：跨段批量导入从"部分提交"变为"全有或全无"。
-- **涉及模块**：core · ingest/SnapshotIngestor、core · segment/SegmentWriter。
-- **验收标准**：注入崩溃点（kill -9）于批量导入中段，重启后要么全量可见、要么全量不可见（manifest 与磁盘一致）；既有批量导入测试（`ingestBatch` 90ms vs 224ms）不回归。
-- **实施情况**（2026-08-20 代码核查）：`SnapshotIngestor.writeSegmentsBatch` 已实现新段 staging——先写 `segments/.staging/*.tmp`，全部完成后 `Files.move(ATOMIC_MOVE)` 统一 rename 到正式路径 + manifest 一次保存；`P0ReliabilityTest.batchAtomicNewSegmentsAndStagingCleanup` 覆盖跨天两新段与 staging 残留启动清理，P0 测试 10 项全绿。
-- **遗留局限**：
-  1. 仅"新段"走 staging；已有段 append 仍为直接追加（依赖崩溃截断兜底，单文件语义本就"全有或全无"），中间回填仍为整段重写（`SegmentRewriter` 的 tmp+rename）；
-  2. rename 循环逐个执行，循环中途崩溃（微秒级窗口 × 段数）仍可能出现部分提交——语义收敛为**"近似原子"**（staging 全部 fsync 后 rename，窗口极小且实践可接受；多文件无原子 rename，不做严格两阶段）；
-  3. staging 残留依赖启动校验 `*.tmp` 清理兜底（正常路径不显式清理，可接受）。
-
-#### O-02 幂等导入语义 `已实施`
-
-- **动机**：消除 G-02。文档声称"崩溃后可安全重导"，但重复时间戳 400 拒绝，调用方实际无法安全重放。
-- **方案要点**：在"重复时间戳 400 拒绝"之外提供可选幂等模式（请求携带 `idempotencyKey` 或 `table+ts+内容哈希`）：相同则跳过并返回原结果；不同则 400。仅内存比对（manifest 已有段内时间戳列表），成本极低。
-- **预期收益**：崩溃恢复后重放导入变为安全操作。
-- **涉及模块**：core · ingest、server · api/DataController（importSnapshot / importSnapshots / importAsync）。
-- **验收标准**：同 key 同内容重放返回原 rowCount 且不产生新数据；同 key 异内容返回 400。
-- **实施情况**（2026-08-20 评审修订）：`AstraDB.ingest` / `ingestBatch` 已实现幂等——`SnapshotData.contentHash64()`（**64 位 FNV-1a**，覆盖列类型/数组内容/null 位图）判定同内容则跳过并返回原结果，异内容走正常路径触发"时间戳已存在"拒绝；**幂等记录持久化到表目录 `idempotency.idx`（24B/条，追加 + fsync，200k 超限截断重写，启动加载）**，崩溃重启后重放同内容仍可幂等跳过（G-02 闭环）。`P0ReliabilityTest` 覆盖单条/批量/跨重启/损坏降级/哈希区分。
-- **遗留局限**：**已全部解决**（2026-08-20 评审修订）——1) 幂等记录持久化至 `idempotency.idx`（崩溃重启后重放安全）；2) 哈希升级 64 位 FNV-1a（碰撞误判跳过风险显著降低，`hash64DistinguishesDifferentContents` 属性验证）。剩余理论风险：64 位哈希仍非零碰撞概率（工程可接受）、幂等文件损坏时降级为进程内幂等（重放需显式处理）。
-
-#### O-03 dataDir 文件锁 `已实施`
-
-- **动机**：消除 G-03。多进程共享数据目录是静默数据损坏来源，当前无任何防护。
-- **方案要点**：启动时对 `dataDir` 内锁文件（如 `data/.lock`）加 `FileChannel.lock()` 排他锁，持有至进程退出；锁失败则启动报错退出（明确提示已有实例运行）。
-- **预期收益**：杜绝双写。
-- **涉及模块**：core · AstraDB.open。
-- **验收标准**：两进程同时 open 同一目录，第二个启动失败并给出明确错误；正常单进程启动/关闭无影响。
-- **实施情况**（2026-08-20 代码核查）：`AstraDB.open` 已对 `dataDir/.lock` 加 `FileChannel.tryLock()` 排他锁（含 `OverlappingFileLockException` 处理），失败抛"数据目录已被其他进程锁定"；`close()` 释放锁与句柄。`P0ReliabilityTest.dataDirLockRejectsSecondInstance` 覆盖（同 JVM 第二实例拒绝、close 后重开数据保留），P0 测试 10 项全绿。**无遗留问题**。
+> O-01（批量导入原子化）、O-02（幂等导入语义）、O-03（dataDir 文件锁）三项 P0 优化**均已实施**，经 [review-p0.md](../review/review-p0.md) v1.2 复审**通过（放行）**（D-10/D-11 关闭），并经 R-01 交付补强（SF-1 幂等随删除清理、SF-5 rename 近似原子、SF-7 目录 fsync 等）。完整归档记录（动机、最终实施、验收、遗留边界）见 **第 6 章**。
 
 ### 2.2 P1 · 内存与性能
 
@@ -160,21 +130,24 @@ AstraDB 是一套**定位清晰、完成度高的自研存储引擎**：以"周�
 - **涉及模块**：server · api（新增 MetricsController）、core · AstraDB（暴露计数）。
 - **验收标准**：指标可被 Prometheus 抓取；关键计数与 stats API 一致。
 
-#### O-14 安全加固 `候选`
+#### O-14 安全加固 `部分实施`
 
 - **动机**：消除 G-10。默认密码明文、无传输加密说明。
 - **方案要点**：密码改 BCrypt 存储（去掉 `{noop}`）；README 补 TLS 部署说明（前置反代终止 TLS）；可选请求限流（每表导入速率）。
 - **预期收益**：生产默认配置不再暴露弱凭据。
 - **涉及模块**：server · config/SecurityConfig、README。
 - **验收标准**：security.enabled=true 时登录/鉴权测试通过（正确 200 / 错误 401）；密码以加密形式配置。
+- **实施情况**（R-02/SS-3，2026-08-21）：**密码存储已落地**——移除 `{noop}` 明文，DelegatingPasswordEncoder（默认 BCrypt）编码存储，配置值带 `{prefix}` 原样使用，默认口令 `admin123` 启动 WARN 告警；`SecurityContractTest` BCrypt 登录回归通过。**剩余**：TLS 部署说明、请求限流仍候选。
+- **验收对照**：密码以加密形式配置 ✅（BCrypt）；鉴权 200/401 ✅；TLS/限流 ⏳ 未做。
 
-#### O-15 CI 与文档卫生 `候选`
+#### O-15 CI 与文档卫生 `部分前置`
 
 - **动机**：消除 G-09 残留；`@Tag("perf")` 基准测试与常规单测混跑，文档测试数量滞后。
 - **方案要点**：GitHub Actions（build + test + 产物上传）；surefire 按 tag 分离 perf 测试（默认跳过，profile 启用）；README/phase-report 测试数量与实测同步；design.md 16 节登记本文档已实施项。
 - **预期收益**：回归自动化、基准可复现、文档可信。
 - **涉及模块**：仓库根（.github/workflows）、pom.xml、文档。
 - **验收标准**：CI 全绿；`mvn test` 与 `mvn test -Pperf` 分离可执行。
+- **实施情况**（2026-08-21）：**文档同步已落地**——README/optimization/phase-report/chain-test-*/review 的测试数量已统一为实测 70 项；黑盒工程 `test/`（31 项）已建立但未纳入 CI。**剩余**：GitHub Actions、surefire perf 分离（`AslpvConsistencyIT` 目前靠 `*IT` 命名被默认排除）仍候选。
 
 #### O-16 schema 演进预留（追加列）`候选`
 
@@ -190,16 +163,16 @@ AstraDB 是一套**定位清晰、完成度高的自研存储引擎**：以"周�
 
 | 阶段 | 范围 | 目标 | 对应优化项 |
 |---|---|---|---|
-| 短期（正确性优先） | P0 | 补"单机单副本 + 无 WAL"的可靠性缺口 | O-01、O-02、O-03 |
+| ~~短期（正确性优先）~~ | P0 | 补"单机单副本 + 无 WAL"的可靠性缺口 —— **已完成并归档（2026-08-21）** | ~~O-01、O-02、O-03~~（见第 6 章） |
 | 中期（核心竞争力） | P1 + P2 高价值项 | 百万级 × 多年规模的**内存与查询表现**（点字典去字符串化、Gorilla 分块）与**产品力**（查询语义统一、快照 diff） | O-04、O-05、O-06、O-08、O-09 |
 | 长期（生态与运维） | P2 剩余 + P3 | 数据可迁移（导出/备份）、分片粒度、可观测性、CI 与文档卫生 | O-10、O-11、O-12、O-13、O-14、O-15、O-16 |
 
 **建议执行顺序**：
 
 1. **先做 O-04 + O-05 + O-16 的格式合并升级**：三者都涉及格式版本变更，合并为一次 FORMAT_VERSION 升级（3），避免多次"旧数据需重导"；
-2. P0（O-01/O-02/O-03）**已实施并评审修订**（2026-08-20）：O-02 跨重启幂等闭环（64 位哈希 + idempotency.idx 持久化）；O-01 新段 staging 原子化（append 崩溃语义与 rename 微秒窗口已文档化接受）；O-07（fsync 策略）与 O-01 存在交互，宜一并设计；
+2. P0（O-01/O-02/O-03）**已完成并归档**（2026-08-21）：O-02 跨重启幂等闭环（64 位哈希 + idempotency.idx 持久化 + R-01 补强幂等随删除清理/占位精确行数）；O-01 新段 staging 原子化（R-01 补强目录 fsync，rename 近似原子已文档化接受）；O-03 dataDir 排他锁（S-1 异常路径释放已修）；三项经 review-p0 v1.2 放行，全量 70 项测试全绿；
 3. O-09（快照 diff）与 O-11（聚合）共用解码路径，可合并实施；
-4. 文档同步（O-15）应随每次实施即时进行，避免再次累积漂移。
+4. 文档同步（O-15）应随每次实施即时进行，避免再次累积漂移（2026-08-21 已统一测试数量口径）。
 
 ## 4. 战略取舍与风险
 
@@ -212,9 +185,9 @@ AstraDB 是一套**定位清晰、完成度高的自研存储引擎**：以"周�
 
 | ID | 标题 | 优先级 | 状态 | 验收可量化 |
 |---|---|---|---|---|
-| O-01 | 批量导入原子化（staging 两阶段提交） | P0 | **已实施**（新段路径；遗留局限见 2.1） | 崩溃注入后全有或全无；批量导入性能不回归 |
-| O-02 | 幂等导入语义 | P0 | **已实施**（64 位哈希 + 持久化，跨重启闭环） | 同 key 重放安全 |
-| O-03 | dataDir 文件锁 | P0 | **已实施**（无遗留） | 双进程第二实例拒绝启动 |
+| O-01 | 批量导入原子化（staging 两阶段提交） | P0 | **已归档**（实施 + R-01 补强，见 6.1） | 崩溃注入后全有或全无（近似原子）；批量导入性能不回归 |
+| O-02 | 幂等导入语义 | P0 | **已归档**（64 位哈希 + 持久化 + 删除清理，见 6.2） | 同 key 重放安全（含删除后重放真正写入） |
+| O-03 | dataDir 文件锁 | P0 | **已归档**（无遗留，见 6.3） | 双进程第二实例拒绝启动 |
 | O-04 | 点字典去字符串化 | P1 | 候选 | 百万点内存降一个数量级 |
 | O-05 | Gorilla 分块 checkpoint | P1 | 候选 | 单点历史查询提速 ≥ 3 倍 |
 | O-06 | 导入/查询内存峰值回落 | P1 | 候选 | 百万行内存峰值降 ≥ 40% |
@@ -225,6 +198,46 @@ AstraDB 是一套**定位清晰、完成度高的自研存储引擎**：以"周�
 | O-11 | 粗粒度流式聚合 | P2 | 候选 | 与逐行计算一致；近零额外内存 |
 | O-12 | 分片粒度可配 | P3 | 候选 | 三种粒度全链路正确 |
 | O-13 | metrics 端点 | P3 | 候选 | Prometheus 可抓取、与 stats 一致 |
-| O-14 | 安全加固 | P3 | 候选 | 加密密码 + 鉴权测试通过 |
-| O-15 | CI 与文档卫生 | P3 | 候选 | CI 全绿、perf 测试分离 |
+| O-14 | 安全加固 | P3 | **部分实施**（BCrypt 已落地；TLS/限流候选） | 加密密码 + 鉴权测试通过 |
+| O-15 | CI 与文档卫生 | P3 | **部分前置**（文档同步已落地；CI/perf 分离候选） | CI 全绿、perf 测试分离 |
 | O-16 | schema 演进预留（追加列） | P3 | 候选 | 旧段混合读取正确 |
+
+---
+
+## 6. 已归档优化项（P0，2026-08-21）
+
+> 归档标准：**已实施 + 评审放行（review-p0 v1.2）+ 交付记录 + 测试证据**。归档不代表停止演进，遗留边界见各项。
+
+### 6.1 O-01 批量导入原子化（staging 两阶段提交）—— 已归档
+
+- **提案**：消除 G-01"部分提交"窗口——批量快照先编码到 staging 临时段，全部完成后统一 rename + 一次 manifest 更新。
+- **最终实施**：`SnapshotIngestor.writeSegmentsBatch` 新段 staging（`segments/.staging/*.tmp` → `Files.move(ATOMIC_MOVE, REPLACE_EXISTING)` 统一 rename + manifest 一次保存）；启动校验清理 `*.tmp` 残留。
+- **评审与交付**：review-p0 v1.2 通过（O-01 staging 正确项确认）；R-01 补强 SF-5（rename 语义收敛为"近似原子"）、SF-7（rename 后目录 fsync，`FsUtil.fsyncDir`）。
+- **验收证据**：`P0ReliabilityTest.batchAtomicNewSegmentsAndStagingCleanup`（跨天两新段 + staging 残留启动清理）；全量 70 项测试全绿。
+- **遗留边界**：仅"新段"走 staging（已有段 append 依赖崩溃截断兜底、中间回填仍为整段重写）；rename 循环为近似原子（微秒级窗口 × 段数，已文档化接受，不做严格两阶段）。
+
+### 6.2 O-02 幂等导入语义 —— 已归档
+
+- **提案**：消除 G-02——同 ts 同内容重放跳过并返回原结果、异内容 400，崩溃后重放安全。
+- **最终实施**：`contentHash64` 64 位 FNV-1a（STRING 逐 char 喂入，弃用 `String.hashCode()`）；幂等记录持久化 `idempotency.idx`（24B/条，追加 + fsync，200k 超限截断重写，启动加载）；预写占位幂等（先落盘幂等、后提交段）；批内合并 fsync；占位确认返回精确行数（SF-6）。
+- **评审与交付**：review-p0 v1.2 通过——B-1 锁序统一（D-10）、B-2 哈希升级（D-11）、S-1/S-2/S-3/O-2 全部修复关闭；R-01 补强 SF-1（幂等随删除/保留期清理，删除后同内容重放真正写入）、SF-6（占位精确行数）。
+- **验收证据**：`P0ReliabilityTest` 10 项（重放/批量/跨重启/损坏降级/哈希区分/锁序/碰撞回归）；`ReviewShouldFixTest`（SF-1/SF-2/SF-6）；黑盒 LD-04（删除后重放写入）/LD-05（混合批部分重放 + 部分新增）。
+- **遗留边界**：64 位哈希仍非零碰撞概率（工程可接受）；幂等文件损坏时降级为进程内幂等（重放需显式处理）。
+
+### 6.3 O-03 dataDir 文件锁 —— 已归档
+
+- **提案**：消除 G-03——启动对 `dataDir/.lock` 加排他锁，锁失败启动报错，杜绝双进程互写。
+- **最终实施**：`AstraDB.open` 对 `.lock` 加 `FileChannel.tryLock()` 排他锁（`OverlappingFileLockException` 处理为 null），失败抛"数据目录已被其他进程锁定"；`close()` 释放锁与句柄；加载失败路径 finally 释放（S-1 修复）。
+- **评审与交付**：review-p0 v1.2 通过（O-03 正确项确认；S-1 已修复并回归）。
+- **验收证据**：`P0ReliabilityTest.dataDirLockRejectsSecondInstance`（同 JVM 第二实例拒绝、close 后重开数据保留）+ `openFailureReleasesLockAndRetrySucceeds`（异常路径释放后同 JVM 重试成功）。
+- **遗留边界**：无。注：锁为 advisory lock，NFS 等网络文件系统上锁语义可能不可靠（部署约束见 README/design）。
+
+### 6.4 归档汇总
+
+| 项 | 优先级 | 归档日期 | 状态 | 关键证据 |
+|---|---|---|---|---|
+| O-01 | P0 | 2026-08-21 | **已归档** | `P0ReliabilityTest` 10 项 + 黑盒 LD-03/LD-05 |
+| O-02 | P0 | 2026-08-21 | **已归档** | `P0ReliabilityTest` 10 项 + `ReviewShouldFixTest` + 黑盒 LD-04/LD-05 |
+| O-03 | P0 | 2026-08-21 | **已归档** | `P0ReliabilityTest` 10 项 |
+
+> 对应缺陷：D-01~D-12 全部关闭、K-01~K-04 已解决；评审问题（B-1/B-2/S-1~S-4/O-1/O-2）处理完毕（见 [review-p0.md](../review/review-p0.md)）。

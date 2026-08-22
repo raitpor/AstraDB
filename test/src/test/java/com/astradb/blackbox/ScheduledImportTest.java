@@ -186,11 +186,11 @@ public class ScheduledImportTest {
         // 单点历史：点 1 在全部 count 个快照的值序列（值随批次递增，验证跨快照不串数据）
         com.fasterxml.jackson.databind.JsonNode series = BlackBoxBase.post("/api/getPointSeries",
                 "{\"table\":\"" + table + "\",\"key\":\"1\",\"from\":0,\"to\":9999999999999,\"limit\":1000}");
-        assertEquals(count, series.size(), "单点历史应覆盖全部快照: " + series);
+        assertEquals(count, series.get("rows").size(), "单点历史应覆盖全部快照: " + series);
         for (int i = 0; i < count; i++) {
-            assertEquals(BASE_TS + i * 60_000L, series.get(i).get("timestamp").asLong());
+            assertEquals(BASE_TS + i * 60_000L, series.get("timestamps").get(i).asLong());
             double expect = 0.5d + i * 0.1d;
-            assertEquals(expect, series.get(i).get("values").get(0).asDouble(), 1e-9,
+            assertEquals(expect, series.get("rows").get(i).get(1).asDouble(), 1e-9,
                     "点 1 在快照 " + i + " 的值");
         }
         System.out.println("[Verify] 单点历史：点 1 在 " + count + " 个快照值序列全部正确");

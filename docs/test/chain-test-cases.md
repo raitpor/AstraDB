@@ -99,7 +99,7 @@
 
 ## R 可靠性专项（P0，2026-08-20 追加）
 
-> 依据：`optimization.md` §2.1（O-01/O-02/O-03）+ `review-p0.md` §4（B-1/B-2/S-1/S-2/S-3/O-2）。执行资产：`core/src/test/.../P0ReliabilityTest`（10 项）。执行结果回填自 2026-08-20 `mvn test -pl core -Dtest=P0ReliabilityTest` 实测（10/10 全绿）与全量 70 项回归（2026-08-21）。
+> 依据：`optimization.md` §6（O-01/O-02/O-03，已归档）+ `review-p0.md` §4（B-1/B-2/S-1/S-2/S-3/O-2）。执行资产：`core/src/test/.../P0ReliabilityTest`（10 项）。执行结果回填自 2026-08-20 `mvn test -pl core -Dtest=P0ReliabilityTest` 实测（10/10 全绿）与全量 70 项回归（2026-08-21）。
 
 | ID | 用例 | 优先级 | 类型 | 验证方式 | 预期结果 | 执行结果 | 状态 |
 |---|---|---|---|---|---|---|---|

@@ -146,7 +146,7 @@
 | 发现 | 黑盒测试（`test/` 工程 `AvailabilityTest.avUnknownEndpoint404`）：`POST /api/notExistEndpoint` 实测返回 **500** 而非 404 |
 | 严重度 | P2（错误语义错误：客户端契约/HTTP 规范要求未知端点 404；500 会被监控误判为服务故障；非数据损坏） |
 | 根因 | `ApiExceptionHandler` 的 `@ExceptionHandler(Exception.class)` 兜底把 Spring 的 `NoResourceFoundException`（未知端点 404 语义）也映射为 `INTERNAL_ERROR` 500；缺少对 `NoResourceFoundException`（及方法不支持类异常）的 404 映射 |
-| 修复 | `ApiExceptionHandler` 新增 `NoResourceFoundException` → 404 `NOT_FOUND`、`HttpRequestMethodNotSupportedException` → 405 `METHOD_NOT_ALLOWED`（均结构化错误体）；详见 [D-12 修复交付](../phaseReport/D-12-unknown-endpoint-404.md) |
+| 修复 | `ApiExceptionHandler` 新增 `NoResourceFoundException` → 404 `NOT_FOUND`、`HttpRequestMethodNotSupportedException` → 405 `METHOD_NOT_ALLOWED`（均结构化错误体）；详见 [D-12 修复交付](../archive/phaseReport/D-12-unknown-endpoint-404.md) |
 | 验证 | 黑盒用例 `avUnknownEndpoint404` 解除 `@Disabled` 启用并通过（404 + NOT_FOUND）；新增 405 用例（`LatestDeliveryAvailabilityTest.ldMethodNotAllowed405`）通过；黑盒全量 31 项 + core/client/server 全量回归全绿 |
 | 状态 | **已验证（关闭）** |
 

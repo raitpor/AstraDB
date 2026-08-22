@@ -25,14 +25,17 @@ public class IntegrityTest extends BlackBoxBase {
         JsonNode full = post("/api/getFullSnapshot", "{\"table\":\"" + t + "\",\"ts\":" + T0 + "}");
         assertEquals(3, full.get("totalRows").asLong());
         JsonNode rows = full.get("rows");
+        // 列式：每行 = [key, v, region]
         // 行 1：v=1.5, region=华东
-        assertEquals(1.5, rows.get(0).get("values").get(0).asDouble(), 1e-9);
-        assertEquals("华东", rows.get(0).get("values").get(1).asText());
+        assertEquals(1.5, rows.get(0).get(1).asDouble(), 1e-9);
+        assertEquals("华东", rows.get(0).get(2).asText());
         // 行 2：v=null, region=华南
-        assertTrue(rows.get(1).get("values").get(0).isNull(), "空值应还原为 null");
-        assertEquals("华南", rows.get(1).get("values").get(1).asText());
+        assertTrue(rows.get(1).get(1).isNull(), "空值应还原为 null");
+        assertEquals("华南", rows.get(1).get(2).asText());
         // 行 3：region=null
-        assertTrue(rows.get(2).get("values").get(1).isNull());
+        assertTrue(rows.get(2).get(2).isNull());
+        assertEquals("id", full.get("pk").asText());
+        assertEquals(3, full.get("columns").size());
         deleteTableQuiet(t);
     }
 
@@ -47,13 +50,13 @@ public class IntegrityTest extends BlackBoxBase {
         importCsv(t, T0 + 120_000L, "1,3.0,x\n");
         JsonNode series = post("/api/getPointSeries",
                 "{\"table\":\"" + t + "\",\"key\":\"1\",\"from\":0,\"to\":9999999999999,\"limit\":100}");
-        assertEquals(3, series.size(), "应返回 3 个时间点");
-        assertEquals(T0, series.get(0).get("timestamp").asLong());
-        assertEquals(2.0, series.get(1).get("values").get(0).asDouble(), 1e-9);
+        assertEquals(3, series.get("rows").size(), "应返回 3 个时间点");
+        assertEquals(T0, series.get("timestamps").get(0).asLong());
+        assertEquals(2.0, series.get("rows").get(1).get(1).asDouble(), 1e-9);
         // 不存在的点 → 空序列
         JsonNode missing = post("/api/getPointSeries",
                 "{\"table\":\"" + t + "\",\"key\":\"999\",\"from\":0,\"to\":9999999999999,\"limit\":100}");
-        assertEquals(0, missing.size(), "未知 key 应返回空序列");
+        assertEquals(0, missing.get("rows").size(), "未知 key 应返回空序列");
         deleteTableQuiet(t);
     }
 
@@ -70,7 +73,7 @@ public class IntegrityTest extends BlackBoxBase {
         // 原数据未被污染
         JsonNode full = post("/api/getFullSnapshot", "{\"table\":\"" + t + "\",\"ts\":" + T0 + "}");
         assertEquals(1, full.get("totalRows").asLong());
-        assertEquals(1.0, full.get("rows").get(0).get("values").get(0).asDouble(), 1e-9);
+        assertEquals(1.0, full.get("rows").get(0).get(1).asDouble(), 1e-9);
         deleteTableQuiet(t);
     }
 
@@ -104,11 +107,11 @@ public class IntegrityTest extends BlackBoxBase {
         importCsv(t, T0, "1,1.0,past\n");
         JsonNode past = post("/api/getFullSnapshot", "{\"table\":\"" + t + "\",\"ts\":" + T0 + "}");
         assertEquals(1, past.get("totalRows").asLong());
-        assertEquals(1.0, past.get("rows").get(0).get("values").get(0).asDouble(), 1e-9);
-        assertEquals("past", past.get("rows").get(0).get("values").get(1).asText());
+        assertEquals(1.0, past.get("rows").get(0).get(1).asDouble(), 1e-9);
+        assertEquals("past", past.get("rows").get(0).get(2).asText());
         // 新快照不受影响
         JsonNode now = post("/api/getFullSnapshot", "{\"table\":\"" + t + "\",\"ts\":" + (T0 + DAY_MS) + "}");
-        assertEquals(2.0, now.get("rows").get(0).get("values").get(0).asDouble(), 1e-9);
+        assertEquals(2.0, now.get("rows").get(0).get(1).asDouble(), 1e-9);
         deleteTableQuiet(t);
     }
 
@@ -147,7 +150,7 @@ public class IntegrityTest extends BlackBoxBase {
         // 重启后数据完好
         JsonNode full = post("/api/getFullSnapshot", "{\"table\":\"" + t + "\",\"ts\":" + T0 + "}");
         assertEquals(3, full.get("totalRows").asLong(), "崩溃重启后已提交快照应完好");
-        assertEquals(1.5, full.get("rows").get(0).get("values").get(0).asDouble(), 1e-9);
+        assertEquals(1.5, full.get("rows").get(0).get(1).asDouble(), 1e-9);
         assertEquals(3, post("/api/getTableStats", "{\"table\":\"" + t + "\"}")
                 .get("pointCount").asLong(), "点字典应完好");
         deleteTableQuiet(t);
@@ -166,10 +169,10 @@ public class IntegrityTest extends BlackBoxBase {
         importCsv(tb, T0, "7,7.0,b\n");
         JsonNode a = post("/api/getFullSnapshot", "{\"table\":\"" + ta + "\",\"ts\":" + T0 + "}");
         assertEquals(1, a.get("totalRows").asLong());
-        assertEquals("a", a.get("rows").get(0).get("values").get(1).asText());
+        assertEquals("a", a.get("rows").get(0).get(2).asText());
         JsonNode b = post("/api/getFullSnapshot", "{\"table\":\"" + tb + "\",\"ts\":" + T0 + "}");
-        assertEquals("b", b.get("rows").get(0).get("values").get(1).asText());
-        assertEquals(7.0, b.get("rows").get(0).get("values").get(0).asDouble(), 1e-9);
+        assertEquals("b", b.get("rows").get(0).get(2).asText());
+        assertEquals(7.0, b.get("rows").get(0).get(1).asDouble(), 1e-9);
         deleteTableQuiet(ta);
         deleteTableQuiet(tb);
     }

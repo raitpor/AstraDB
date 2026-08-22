@@ -2,8 +2,8 @@
 
 > 版本：v1.2（复审）· 日期：2026-08-21 · 状态：正式
 > 评审历程：v1.0（2026-08-20 初评，无 blocking / 8+10 项 should-fix）→ v1.1（2026-08-21：R-01 修复 core SF-1~SF-8、D-12 关闭）→ **v1.2（2026-08-21：R-02 修复 server/client SS-1~SS-10，should-fix 全部清零，本版）**
-> 评审基准：工作区 HEAD + 未提交的修复（R-01：SF-1~SF-8；R-02：SS-1~SS-10；D-12：404/405 错误语义）
-> 关联文档：[review-p0.md](./review-p0.md)（P0 专项评审）、[optimization.md](../design/optimization.md)（优化提案）、[design.md](../design/design.md)（设计）、[R-01 修复交付](../phaseReport/R-01-review-shouldfix.md)、[R-02 修复交付](../phaseReport/R-02-review-server-shouldfix.md)、[D-12 修复交付](../phaseReport/D-12-unknown-endpoint-404.md)、[blackbox-test-report.md](../test/blackbox-test-report.md)（黑盒测试）、[defects.md](../test/defects.md)（缺陷跟踪）
+> 评审基准：工作区 HEAD（R-01/R-02/D-12 修复均已提交：commit 856b925 / a37ae48）
+> 关联文档：[review-p0.md](./review-p0.md)（P0 专项评审）、[optimization.md](../design/optimization.md)（优化提案）、[design.md](../design/design.md)（设计）、[R-01 修复交付](../archive/phaseReport/R-01-review-shouldfix.md)、[R-02 修复交付](../archive/phaseReport/R-02-review-server-shouldfix.md)、[D-12 修复交付](../archive/phaseReport/D-12-unknown-endpoint-404.md)、[blackbox-test-report.md](../test/blackbox-test-report.md)（黑盒测试）、[defects.md](../test/defects.md)（缺陷跟踪）
 
 ---
 
@@ -12,7 +12,7 @@
 | 维度 | 范围 |
 |---|---|
 | 代码 | `core/`（存储/编码/压缩/段/点字典/导入/查询/保留期）、`server/`（API/安全/异步导入/UI）、`client/`（二进制协议 + 自含 JSON）、`test/`（黑盒测试工程） |
-| 文档对照 | design.md、optimization.md、chain-test-*、blackbox-test-report.md、defects.md、R-01/D-12 交付报告 |
+| 文档对照 | design.md、optimization.md、chain-test-*、blackbox-test-report.md、defects.md、R-01/R-02/D-12 交付报告 |
 | 实测（v1.2） | `mvn test`：**BUILD SUCCESS，70 项全绿**（core 41 + client 16 + server 13）；黑盒工程 31 项 BUILD SUCCESS |
 | 原则 | 只读评审，不修改任何 Java 代码；结论均附 file:line 证据 |
 
@@ -54,7 +54,7 @@
 
 ## 4. core 问题清单
 
-### 4.1 should-fix（v1.0 清单；**v1.1 全部已修复**，交付见 [R-01](../phaseReport/R-01-review-shouldfix.md)）
+### 4.1 should-fix（v1.0 清单；**v1.1 全部已修复**，交付见 [R-01](../archive/phaseReport/R-01-review-shouldfix.md)）
 
 | ID | 问题（v1.0 描述） | 修复方案（R-01） | 验证 | 状态 |
 |---|---|---|---|---|
@@ -67,7 +67,7 @@
 | SF-7 | **删除/rename 后无目录 fsync**（断电后目录项可能不持久） | 新增 `core/util/FsUtil.fsyncDir`，接入 JsonFiles.write、SegmentRewriter.rewrite、writeSegmentsBatch、RetentionCleaner.clean、deleteSegment/deleteSnapshot；平台不支持降级 WARN | core 41 项回归 | ✅ 已修复 |
 | SF-8 | **`SegmentWriter.close` 异常路径泄漏 RAF 句柄** | `close()` 改 try/finally：`closed` 置位与 `raf.close()` 无论成败必然执行 | core 41 项回归 | ✅ 已修复 |
 
-### 4.2 观察项（v1.0 清单，v1.1 状态）
+### 4.2 观察项（v1.0 清单，v1.2 状态）
 
 | ID | 内容 | v1.1 状态 |
 |---|---|---|
@@ -90,7 +90,7 @@
 
 ## 5. server / client 问题清单
 
-### 5.1 should-fix（v1.0 清单 SS-1~SS-11：**v1.2 全部已修复**，交付见 [R-02](../phaseReport/R-02-review-server-shouldfix.md)、SS-11 见 [D-12](../phaseReport/D-12-unknown-endpoint-404.md)）
+### 5.1 should-fix（v1.0 清单 SS-1~SS-11：**v1.2 全部已修复**，交付见 [R-02](../archive/phaseReport/R-02-review-server-shouldfix.md)、SS-11 见 [D-12](../archive/phaseReport/D-12-unknown-endpoint-404.md)）
 
 | ID | 问题（v1.0 描述） | 修复方案（R-02） | 验证 | 状态 |
 |---|---|---|---|---|
@@ -106,7 +106,7 @@
 | SS-10 | **client `escape()` 不完整 → 控制字符 key 生成非法 JSON** | 4 处 JSON 拼接改用 `ClientJson.quote`（含 `\uXXXX` 转义），删除不完整的 `escape()` | `ClientContractTest` 新增换行/引号/反斜杠 key 断言 | ✅ 已修复 |
 | SS-11 | **未知 API 端点返回 500 而非 404**（黑盒 AV-04 发现，D-12） | `NoResourceFoundException`→404 NOT_FOUND、`HttpRequestMethodNotSupportedException`→405 METHOD_NOT_ALLOWED，错误体结构化 | 黑盒 LD-01/LD-02 | ✅ 已修复（D-12） |
 
-### 5.2 观察项（v1.0 清单，v1.1 状态）
+### 5.2 观察项（v1.0 清单，v1.2 状态）
 
 | ID | 内容 | 状态 |
 |---|---|---|
@@ -124,7 +124,7 @@
 | SO-12 | `ImportTaskService` 任务失败仅取 `t.getMessage()`，message 为 null 时前端显示 null | 未处理 |
 | SO-13 | 黑盒工程 `test/` 未纳入 CI；性能专项（写入 ≤5s / 读取 ≤2s）无黑盒计时断言（blackbox-test-report 7 节遗留） | 未处理 |
 
-## 6. 测试覆盖与文档一致性核对（v1.1 更新）
+## 6. 测试覆盖与文档一致性核对（v1.2 更新）
 
 | 项目 | 文档声称 | 实测 | 结论 |
 |---|---|---|---|

@@ -111,8 +111,8 @@ class ClientContractTest {
         route("/api/getPointSeries", ex -> {
             String body = new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             assertTrue(body.contains("\"from\":1000") && body.contains("\"to\":1000") && body.contains("\"limit\":1"));
-            json(ex, 200, body.contains("nope") ? "[]"
-                    : "[{\"timestamp\":1000,\"values\":[10,1.5,\"华东\"]}]");
+            json(ex, 200, body.contains("nope") ? "{\"pk\":\"id\",\"columns\":[\"id\",\"v\",\"region\"],\"rows\":[],\"timestamps\":[]}"
+                    : "{\"pk\":\"id\",\"columns\":[\"id\",\"v\",\"region\"],\"rows\":[[\"42\",10,1.5,\"华东\"]],\"timestamps\":[1000]}");
         });
         AstraDbClient client = new AstraDbClient(baseUrl);
         assertArrayEquals(new Object[]{10L, 1.5, "华东"}, client.queryPointAt("t1", "42", 1000L));
@@ -127,7 +127,7 @@ class ClientContractTest {
             // （修复前 escape() 只转义 \ 与 "，换行/制表符生成裸控制字符的非法 JSON）
             assertTrue(body.contains("\"table\":\"t\\t1\""), "表名制表符应转义: " + body);
             assertTrue(body.contains("\"key\":\"a\\nb\\\"c\\\\d\""), "key 换行/引号/反斜杠应转义: " + body);
-            json(ex, 200, "[{\"timestamp\":1000,\"values\":[1.0]}]");
+            json(ex, 200, "{\"pk\":\"id\",\"columns\":[\"id\",\"v\"],\"rows\":[[\"a\\nb\\\"c\\\\d\",1.0]],\"timestamps\":[1000]}");
         });
         Object[] r = new AstraDbClient(baseUrl).queryPointAt("t\t1", "a\nb\"c\\d", 1000L);
         assertArrayEquals(new Object[]{1.0}, r);

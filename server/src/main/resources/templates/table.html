@@ -130,7 +130,14 @@
         $('statRetention').textContent = info.retentionDays + ' 天';
         $('statLevel').textContent = info.compressionLevel;
         schemaCols = info.schema.columns.map(c => c.name);
-        $('schemaInfo').textContent = 'schema: ' + info.schema.columns.map(c => c.name + ':' + c.type).join('，');
+        // 表结构展示：列名 / 类型 / 主键标记 / 可空标记（SS-4：esc 转义防注入）
+        const pkIdx = info.schema.primaryKeyIndex;
+        $('schemaInfo').innerHTML = '表结构：'
+            + '<table class="schema"><thead><tr><th>列名</th><th>类型</th><th>主键</th><th>可空</th></tr></thead><tbody>'
+            + info.schema.columns.map((c, i) =>
+                `<tr><td>${esc(c.name)}</td><td>${esc(c.type)}</td>`
+                + `<td>${i === pkIdx ? '✓' : ''}</td><td>${c.nullable ? '可空' : '非空'}</td></tr>`).join('')
+            + '</tbody></table>';
     }
 
     async function loadSegments() {
@@ -218,6 +225,7 @@
             const s = await api('/api/getSnapshot', req);
             $('browseError').textContent = '';
             lastTotal = s.totalRows;
+            const cols = s.columns || schemaCols;
             const rows = s.rows || [];
             if (rows.length === 0 && page > 0) { page--; return browse(0); }
             if (rows.length === 0) {
@@ -226,13 +234,13 @@
                 $('browseInfo').textContent = `请求时间 ${fmtTime(ts)}`;
                 return;
             }
-            let html = '<table><tr><th>' + esc(schemaCols[0] || '主键') + '</th>';
-            for (let i = 1; i < schemaCols.length; i++) html += `<th>${esc(schemaCols[i])}</th>`;
+            // 列式响应：columns 表头（SS-4 esc 转义）+ rows 二维数组（主键在首位）
+            let html = '<table><tr>';
+            for (const c of cols) html += `<th>${esc(c)}</th>`;
             html += '</tr>';
-            for (const r of rows) {
-                // SS-4：主键与列值（STRING 可为 <img onerror=...>）经 esc 转义
-                html += `<tr><td>${esc(r.key)}</td>`;
-                for (const v of r.values) {
+            for (const row of rows) {
+                html += '<tr>';
+                for (const v of row) {
                     html += `<td>${v === null || v === undefined ? '∅' : esc(v)}</td>`;
                 }
                 html += '</tr>';
@@ -259,15 +267,22 @@
         $('pointReq').textContent = 'POST /api/getPointSeries ' + JSON.stringify(req);
         try {
             const list = await api('/api/getPointSeries', req);
-            if (!list.length) {
+            if (!list.rows || !list.rows.length) {
                 box.innerHTML = '<div class="hint">该时间点（或之前）没有该点的数据</div>';
                 return;
             }
-            const last = list[list.length - 1]; // 升序列表最后一条 = 最近值
-            let html = `<div class="hint">点 ${esc(id)} · 实际快照时间 ${fmtTime(last.timestamp)}</div><div class="kv">`;
-            for (let i = 0; i < last.values.length; i++) {
+            // 列式响应：rows 每行含主键值、timestamps 与行对齐；末行 = 最近状态
+            const rows = list.rows;
+            const timestamps = list.timestamps;
+            const last = rows[rows.length - 1];
+            const lastTs = timestamps[timestamps.length - 1];
+            const cols = list.columns;
+            const pkIdx = cols.indexOf(list.pk);
+            let html = `<div class="hint">点 ${esc(id)} · 实际快照时间 ${fmtTime(lastTs)}</div><div class="kv">`;
+            for (let i = 0; i < last.length; i++) {
+                if (i === pkIdx) continue; // 跳过主键列（主键由 id 展示）
                 // SS-4：列名与值（STRING 可含 HTML）经 esc 转义
-                html += `<div class="item"><b>${esc(schemaCols[i + 1] || 'c' + (i + 1))}</b> = ${esc(last.values[i])}</div>`;
+                html += `<div class="item"><b>${esc(cols[i])}</b> = ${esc(last[i])}</div>`;
             }
             html += '</div>';
             box.innerHTML = html;

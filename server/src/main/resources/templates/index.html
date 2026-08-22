@@ -31,7 +31,7 @@
                 <label>表名</label><input id="tname" required>
                 <label>主键列</label><input id="tpk" required>
                 <label>保留天数</label><input id="tret" type="number" value="1825" min="1" style="width:90px">
-                <label>压缩等级</label><input id="tlevel" type="number" value="3" min="1" max="22" style="width:70px">
+                <label>压缩等级</label><input id="tlevel" type="number" th:value="${defaultCompressionLevel}" min="1" max="22" style="width:70px">
             </div>
             <table id="colTable">
                 <thead><tr><th>列名</th><th>类型</th><th>可空</th><th></th></tr></thead>
@@ -58,12 +58,28 @@
             '<td><input type="checkbox" class="cnull"></td>' +
             '<td><button type="button" class="ghost" onclick="this.closest(\'tr\').remove()">删除</button></td>';
         tbody.appendChild(tr);
+        syncPkNullable();
     }
+
+    // 主键列可空复选框禁用（UX）：主键列强制非空，tpk 变化/增删列时同步
+    function syncPkNullable() {
+        const pk = document.getElementById('tpk').value.trim();
+        document.querySelectorAll('#colTable tbody tr').forEach(tr => {
+            const cb = tr.querySelector('.cnull');
+            const isPk = tr.querySelector('.cname').value === pk;
+            cb.disabled = isPk;
+            if (isPk) cb.checked = false;
+        });
+    }
+    document.getElementById('tpk').addEventListener('input', syncPkNullable);
     document.getElementById('createForm').addEventListener('submit', async (e) => {
         e.preventDefault();
+        const pkName = document.getElementById('tpk').value.trim();
         const cols = [...document.querySelectorAll('#colTable tbody tr')].map(tr => ({
             name: tr.querySelector('.cname').value,
-            type: tr.querySelector('.ctype').value
+            type: tr.querySelector('.ctype').value,
+            // 可空复选框生效；主键列强制非空（core 校验兜底，此处页面即收敛）
+            nullable: tr.querySelector('.cname').value === pkName ? false : tr.querySelector('.cnull').checked
         }));
         const msg = document.getElementById('createMsg');
         try {

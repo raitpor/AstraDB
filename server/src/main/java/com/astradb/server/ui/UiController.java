@@ -1,5 +1,6 @@
 package com.astradb.server.ui;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -11,8 +12,13 @@ import org.springframework.web.bind.annotation.RequestParam;
 @Controller
 public class UiController {
 
+    /** 建表表单默认 zstd 压缩等级，与 server 配置（astradb.compression-level）同步。 */
+    @Value("${astradb.compression-level:3}")
+    private int defaultCompressionLevel;
+
     @GetMapping("/")
-    public String index() {
+    public String index(Model model) {
+        model.addAttribute("defaultCompressionLevel", defaultCompressionLevel);
         return "index";
     }
 

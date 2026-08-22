@@ -170,7 +170,7 @@ public class LatestServerDeliveryTest {
         JsonNode snap = post("/api/getSnapshot",
                 "{\"table\":\"" + t + "\",\"ts\":" + T0 + ",\"offset\":0,\"limit\":10}");
         assertEquals(1, snap.get("totalRows").asLong());
-        assertEquals(1.5, snap.get("rows").get(0).get("values").get(0).asDouble(), 1e-9);
+        assertEquals(1.5, snap.get("rows").get(0).get(1).asDouble(), 1e-9); // 列式：row=[key,v,region]
         deleteTableQuiet(t);
     }
 

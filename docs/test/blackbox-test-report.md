@@ -85,7 +85,7 @@
 
 ## 9. 最新交付可用性测试（R-01 SF-1~SF-8 + D-12，2026-08-21 追加）
 
-> 针对交付文档：[D-12 修复交付](../phaseReport/D-12-unknown-endpoint-404.md)、[R-01 修复交付](../phaseReport/R-01-review-shouldfix.md)。
+> 针对交付文档：[D-12 修复交付](../archive/phaseReport/D-12-unknown-endpoint-404.md)、[R-01 修复交付](../archive/phaseReport/R-01-review-shouldfix.md)。
 > 测试代码：`test/src/test/java/com/astradb/blackbox/LatestDeliveryAvailabilityTest.java`（7 项，黑盒：HTTP + 文件系统行为）。
 > 执行结果：`mvn -f test/pom.xml test -Dtest=LatestDeliveryAvailabilityTest` → **Tests run: 7, Failures: 0, Errors: 0**；黑盒全量 31 项 BUILD SUCCESS。
 
@@ -134,7 +134,7 @@
 
 ## 10. R-02 server/client should-fix 测试（SS-1~SS-10，2026-08-21 追加）
 
-> 针对交付文档：[R-02 修复交付](../phaseReport/R-02-review-server-shouldfix.md)（review.md 5.1 SS-1~SS-10）。
+> 针对交付文档：[R-02 修复交付](../archive/phaseReport/R-02-review-server-shouldfix.md)（review.md 5.1 SS-1~SS-10）。
 > 测试代码：`test/src/test/java/com/astradb/blackbox/LatestServerDeliveryTest.java`（8 项，黑盒：HTTP + client SDK）。
 > 执行结果：`mvn -f test/pom.xml test -Dtest=LatestServerDeliveryTest` → **Tests run: 8, Failures: 0, Errors: 0**；黑盒全量 39 项 BUILD SUCCESS。
 
